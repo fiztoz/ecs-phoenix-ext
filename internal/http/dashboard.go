@@ -18,12 +18,14 @@ type bucketView struct {
 	UsedBytes     int64
 	Objects       int64
 	MPU           string
+	MPUBytes      int64
 	HasQuota      bool
 	Quota         string
 	QuotaBytes    int64
 	Percent       string
 	BarWidth      int
 	SampleTime    string
+	SampleUnix    int64 // -1 when no sample (quota-only)
 	UptodateTill  string
 	Stale         bool
 	OverStreak    int
@@ -84,6 +86,7 @@ func (s *Server) buildDashboard(r *http.Request) dashboardData {
 				HasQuota:   true,
 				Quota:      HumanBytes(q.QuotaBytes),
 				QuotaBytes: q.QuotaBytes,
+				SampleUnix: -1,
 				QuotaOnly:  true,
 			}
 			data.Buckets = append(data.Buckets, v)
@@ -99,7 +102,9 @@ func toBucketView(b poller.BucketState) bucketView {
 		UsedBytes:     b.UsedBytes,
 		Objects:       b.Objects,
 		MPU:           HumanBytes(b.MPUBytes),
+		MPUBytes:      b.MPUBytes,
 		SampleTime:    b.SampleTime.UTC().Format("2006-01-02 15:04 UTC"),
+		SampleUnix:    sampleUnix(b.SampleTime),
 		Stale:         b.Stale,
 		OverStreak:    b.OverStreak,
 		ConfirmedOver: b.ConfirmedOver,
@@ -126,6 +131,13 @@ func toBucketView(b poller.BucketState) bucketView {
 		v.BarWidth = w
 	}
 	return v
+}
+
+func sampleUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return -1
+	}
+	return t.Unix()
 }
 
 func pctStr(p float64) string {

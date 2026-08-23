@@ -57,13 +57,28 @@
   .wrap { max-width:1100px; margin:0 auto; padding:1.5rem 1.25rem 3rem; position:relative; z-index:1; }
 
   /* Header */
-  header { display:flex; flex-wrap:wrap; gap:0.75rem; align-items:baseline;
+  header { display:flex; flex-wrap:wrap; gap:0.75rem; align-items:center;
            justify-content:space-between; margin-bottom:0.5rem; }
   h1 { font-size:1.25rem; margin:0; font-weight:600; letter-spacing:-0.01em; }
   h1 code { color:var(--primary); font-weight:700; }
   .sub { color:var(--muted-fg); font-size:0.8125rem; }
   .sub a { color:var(--info); text-decoration:none; }
   .sub a:hover { text-decoration:underline; }
+
+  /* Toolbar (search + wallboard button) */
+  .toolbar { display:flex; flex-wrap:wrap; gap:0.5rem; align-items:center; }
+  .search { position:relative; }
+  .search input { width:200px; background:var(--bg); color:var(--fg);
+           border:1px solid var(--input); border-radius:0.375rem; padding:0.375rem 0.5rem
+           0.375rem 1.75rem; font-size:0.875rem; }
+  .search svg { position:absolute; left:0.5rem; top:50%; transform:translateY(-50%);
+                width:0.875rem; height:0.875rem; color:var(--muted-fg); pointer-events:none; }
+  .btn-wallboard { display:inline-flex; align-items:center; gap:0.375rem;
+           border:1px solid var(--border); background:var(--surface); color:var(--fg);
+           border-radius:0.5rem; padding:0.375rem 0.75rem; font-size:0.875rem; font-weight:500;
+           text-decoration:none; transition:background 0.15s,border-color 0.15s; }
+  .btn-wallboard:hover { background:var(--elevated); border-color:var(--primary); }
+  .btn-wallboard svg { width:0.875rem; height:0.875rem; }
 
   /* Summary bar */
   .summary { display:flex; gap:1.5rem; background:var(--card); border:1px solid var(--border);
@@ -88,9 +103,13 @@
   th, td { padding:0.625rem 0.75rem; text-align:left; border-bottom:1px solid var(--border);
            font-variant-numeric:tabular-nums; }
   th { color:var(--faint); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.04em; font-weight:500; }
+  th.sortable { cursor:pointer; user-select:none; white-space:nowrap; }
+  th.sortable:hover { color:var(--fg); }
+  th.sortable .arrow { display:inline-block; width:0.65em; margin-left:0.25em; color:var(--primary); }
   tr:last-child td { border-bottom:none; }
   tr:hover td { background:oklch(1 0 0 / 0.02); }
   .name { font-weight:600; }
+  tr.hidden { display:none; }
 
   /* Progress bar */
   .bar { width:140px; height:8px; background:var(--muted); border-radius:4px; overflow:hidden; }
@@ -139,7 +158,26 @@
 <div class="wrap">
   <header>
     <h1>ECS Storage — <code>{{.Namespace}}</code></h1>
-    <span class="sub">wallboard: <a href="{{.BasePath}}/wallboard">{{.BasePath}}/wallboard</a></span>
+    <div class="toolbar">
+      <div class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input type="text" id="search" placeholder="Search buckets…">
+      </div>
+      <a href="{{.BasePath}}/wallboard" class="btn-wallboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 3H5a2 2 0 0 0-2 2v3"/>
+          <path d="M21 8V5a2 2 0 0 0-2-2h-3"/>
+          <path d="M3 16v3a2 2 0 0 0 2 2h3"/>
+          <path d="M16 21h3a2 2 0 0 0 2-2v-3"/>
+        </svg>
+        Wallboard
+      </a>
+    </div>
   </header>
 
   {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
@@ -160,14 +198,27 @@
   <table>
     <thead>
       <tr>
-        <th>Bucket</th><th>Used</th><th>Objects</th><th>MPU</th>
-        <th>Quota</th><th>Used %</th><th></th>
-        <th>Sample</th><th>Status</th><th></th>
+        <th class="sortable" data-key="name">Bucket<span class="arrow"></span></th>
+        <th class="sortable" data-key="used">Used<span class="arrow"></span></th>
+        <th class="sortable" data-key="objects">Objects<span class="arrow"></span></th>
+        <th class="sortable" data-key="mpu">MPU<span class="arrow"></span></th>
+        <th class="sortable" data-key="quota">Quota<span class="arrow"></span></th>
+        <th class="sortable" data-key="percent">Used %<span class="arrow"></span></th>
+        <th></th>
+        <th class="sortable" data-key="sample">Sample<span class="arrow"></span></th>
+        <th class="sortable" data-key="status">Status<span class="arrow"></span></th>
+        <th></th>
       </tr>
     </thead>
-    <tbody>
+    <tbody id="buckets">
     {{range .Buckets}}
-      <tr>
+      <tr data-name="{{.Name}}" data-used="{{if .QuotaOnly}}-1{{else}}{{.UsedBytes}}{{end}}"
+          data-objects="{{if .QuotaOnly}}-1{{else}}{{.Objects}}{{end}}"
+          data-mpu="{{if .QuotaOnly}}-1{{else}}{{.MPUBytes}}{{end}}"
+          data-quota="{{if .HasQuota}}{{.QuotaBytes}}{{else}}-1{{end}}"
+          data-percent="{{if .HasQuota}}{{if .ConfirmedOver}}9999{{else}}{{.BarWidth}}{{end}}{{else}}-1{{end}}"
+          data-sample="{{.SampleUnix}}"
+          data-status="{{if .ConfirmedOver}}over{{else if .Stale}}stale{{else if .QuotaOnly}}quota-only{{else}}ok{{end}}">
         <td class="name">{{.Name}}
           {{if .QuotaOnly}}<span class="badge quota-only">quota set · not in last poll</span>{{end}}
         </td>
@@ -210,7 +261,7 @@
         </td>
       </tr>
     {{else}}
-      <tr><td colspan="10" class="sub">No buckets in the last poll yet.</td></tr>
+      <tr class="empty-row"><td colspan="10" class="sub">No buckets in the last poll yet.</td></tr>
     {{end}}
     </tbody>
   </table>
@@ -220,5 +271,70 @@
     Quotas are operator-set in this tool — ECS has no bucket quota field.
   </footer>
 </div>
+
+<script>
+  (function () {
+    var tbody = document.getElementById('buckets');
+    if (!tbody) return;
+    var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr[data-name]'));
+    var emptyRow = tbody.querySelector('tr.empty-row');
+    var search = document.getElementById('search');
+    var headers = Array.prototype.slice.call(document.querySelectorAll('th.sortable'));
+    var sortKey = null;
+    var sortDir = 1;
+    var noMatch = null;
+
+    function parseNum(v) { var n = parseFloat(v); return isNaN(n) ? -1 : n; }
+
+    function getVal(row, key) {
+      if (key === 'name') return row.dataset.name.toLowerCase();
+      if (key === 'status') {
+        var order = { 'over': 0, 'stale': 1, 'ok': 2, 'quota-only': 3 };
+        return order[row.dataset.status] != null ? order[row.dataset.status] : 4;
+      }
+      return parseNum(row.dataset[key]);
+    }
+
+    function apply() {
+      var q = (search && search.value.trim().toLowerCase()) || '';
+      var visible = rows.filter(function (r) {
+        return q === '' || r.dataset.name.toLowerCase().indexOf(q) !== -1;
+      });
+      if (sortKey) {
+        visible.sort(function (a, b) {
+          var av = getVal(a, sortKey), bv = getVal(b, sortKey);
+          if (av < bv) return -1 * sortDir;
+          if (av > bv) return 1 * sortDir;
+          return 0;
+        });
+      }
+      rows.forEach(function (r) { r.classList.add('hidden'); });
+      visible.forEach(function (r) { r.classList.remove('hidden'); tbody.appendChild(r); });
+
+      if (emptyRow) emptyRow.classList.add('hidden');
+      if (noMatch) { noMatch.remove(); noMatch = null; }
+      if (rows.length > 0 && visible.length === 0) {
+        noMatch = document.createElement('tr');
+        noMatch.innerHTML = '<td colspan="10" class="sub">No buckets match your search.</td>';
+        tbody.appendChild(noMatch);
+      }
+    }
+
+    headers.forEach(function (th) {
+      th.addEventListener('click', function () {
+        var key = th.dataset.key;
+        if (sortKey === key) { sortDir = -sortDir; } else { sortKey = key; sortDir = 1; }
+        headers.forEach(function (h) {
+          var a = h.querySelector('.arrow');
+          if (a) a.textContent = (h.dataset.key === key) ? (sortDir === 1 ? '▲' : '▼') : '';
+        });
+        apply();
+      });
+    });
+
+    if (search) search.addEventListener('input', apply);
+    apply();
+  })();
+</script>
 </body>
 </html>
