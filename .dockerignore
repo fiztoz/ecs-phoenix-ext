@@ -1,0 +1,4 @@
+bin/
+*.db
+.git/
+deploy/

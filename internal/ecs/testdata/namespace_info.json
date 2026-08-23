@@ -1,0 +1,25 @@
+{
+  "name": "prod-ns",
+  "namespace": "prod-ns",
+  "total_size": 11,
+  "total_size_unit": "GB",
+  "total_objects": 2,
+  "sample_time": "2026-08-18T09:55:00Z",
+  "uptodate_till": "2026-08-18T09:50:00Z",
+  "total_mpu_size": 0,
+  "total_mpu_parts": 0,
+  "bucket_billing_info": [
+    {
+      "name": "sample-bkt",
+      "namespace": "prod-ns",
+      "total_size": 11,
+      "total_size_unit": "GB",
+      "total_objects": 2,
+      "sample_time": "2026-08-18T09:55:00Z",
+      "uptodate_till": "2026-08-18T09:50:00Z",
+      "total_mpu_size": 0,
+      "total_mpu_parts": 0
+    }
+  ],
+  "next_marker": ""
+}

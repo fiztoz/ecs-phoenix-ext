@@ -1,0 +1,21 @@
+# Ingress path snippet — the /storage rule MUST be inserted BEFORE the
+# catch-all / rule of the Phoenix Ingress (or applied as its own resource
+# with the more specific path). Same host as Phoenix so the admin iframe
+# stays same-origin (frame-ancestors 'self').
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ecs-phoenix-ext
+  namespace: phoenix
+spec:
+  rules:
+    - host: phoenix.example.com
+      http:
+        paths:
+          - path: /storage
+            pathType: Prefix
+            backend:
+              service:
+                name: ecs-phoenix-ext
+                port:
+                  number: 80

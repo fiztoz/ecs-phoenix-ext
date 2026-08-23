@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="300">
+<title>ECS Storage Wallboard — {{.Namespace}}</title>
+<style>
+  :root { --bg:#0a0d12; --panel:#12161e; --line:#232a37; --fg:#eef2f8;
+          --mut:#7d8699; --ok:#3fb96f; --warn:#e0a63f; --bad:#e05252; --accent:#5b8def; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .wrap { max-width:1200px; margin:0 auto; padding:4vh 4vw; }
+  .top { display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:16px; }
+  h1 { font-size:clamp(22px,3vw,34px); margin:0; font-weight:700; }
+  h1 code { color:var(--accent); }
+  .meta { color:var(--mut); font-size:clamp(13px,1.4vw,17px); }
+  .ns { margin:3vh 0; background:var(--panel); border:1px solid var(--line);
+        border-radius:16px; padding:24px 28px; display:flex; gap:8vw; flex-wrap:wrap; }
+  .ns .k { color:var(--mut); text-transform:uppercase; letter-spacing:.06em;
+           font-size:clamp(12px,1.2vw,15px); }
+  .ns .v { font-size:clamp(34px,4.5vw,58px); font-weight:800; font-variant-numeric:tabular-nums; }
+  .alert { background:#2a1b1b; border:1px solid #4a2c2c; color:#e6bfbf; border-radius:12px;
+           padding:14px 20px; font-size:clamp(15px,1.6vw,19px); margin-bottom:2vh; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px;
+          padding:20px 22px; }
+  .card.over { border-color:var(--bad); box-shadow:0 0 0 1px var(--bad) inset; }
+  .card.stale { border-color:var(--warn); }
+  .card .name { font-size:clamp(15px,1.6vw,19px); font-weight:650; word-break:break-all; }
+  .card .used { font-size:clamp(30px,3.6vw,46px); font-weight:800;
+                font-variant-numeric:tabular-nums; margin:8px 0 2px; }
+  .card .of { color:var(--mut); font-size:clamp(14px,1.4vw,17px); }
+  .card .pct { font-size:clamp(20px,2.2vw,28px); font-weight:750; margin-top:10px; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  .tag { display:inline-block; margin-top:10px; font-size:12px; font-weight:800;
+         text-transform:uppercase; letter-spacing:.05em; padding:3px 10px; border-radius:999px; }
+  .tag.ok { background:#15291d; } .tag.warn { background:#3a3115; } .tag.bad { background:#3a1515; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>ECS Storage <code>{{.Namespace}}</code></h1>
+    <span class="meta">last poll {{if .PolledAt.IsZero}}—{{else}}{{.PolledAt.UTC.Format "15:04 UTC"}} ({{age .PolledAt .Now}} ago){{end}}</span>
+  </div>
+
+  {{if not .PollOK}}
+    <div class="alert">Polling degraded — showing last good sample{{if .LastError}}: {{.LastError}}{{end}}</div>
+  {{end}}
+
+  <div class="ns">
+    <div><div class="k">Namespace used</div><div class="v">{{.NamespaceUsed}}</div></div>
+    <div><div class="k">Objects</div><div class="v">{{.NamespaceObjects}}</div></div>
+  </div>
+
+  <div class="grid">
+  {{range .Buckets}}
+    <div class="card {{if .ConfirmedOver}}over{{else if .Stale}}stale{{end}}">
+      <div class="name">{{.Name}}</div>
+      <div class="used">{{.Used}}</div>
+      {{if .HasQuota}}
+        <div class="of">of {{.Quota}} quota</div>
+        <div class="pct {{if .ConfirmedOver}}bad{{else if ge .BarWidth 80}}warn{{else}}ok{{end}}">{{.Percent}}</div>
+      {{end}}
+      {{if .ConfirmedOver}}<span class="tag bad">over quota</span>
+      {{else if .Stale}}<span class="tag warn">stale sample</span>
+      {{else}}<span class="tag ok">ok</span>{{end}}
+    </div>
+  {{else}}
+    <div class="meta">No buckets in the last poll yet.</div>
+  {{end}}
+  </div>
+</div>
+</body>
+</html>

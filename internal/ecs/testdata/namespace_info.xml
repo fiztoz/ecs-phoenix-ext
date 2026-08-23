@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<namespace_billing_info>
+  <name>prod-ns</name>
+  <namespace>prod-ns</namespace>
+  <total_size>11</total_size>
+  <total_size_unit>GB</total_size_unit>
+  <total_objects>2</total_objects>
+  <sample_time>2026-08-18T09:55:00Z</sample_time>
+  <uptodate_till>2026-08-18T09:50:00Z</uptodate_till>
+  <total_mpu_size>0</total_mpu_size>
+  <total_mpu_parts>0</total_mpu_parts>
+  <bucket_billing_info>
+    <name>sample-bkt</name>
+    <namespace>prod-ns</namespace>
+    <total_size>11</total_size>
+    <total_size_unit>GB</total_size_unit>
+    <total_objects>2</total_objects>
+    <sample_time>2026-08-18T09:55:00Z</sample_time>
+    <uptodate_till>2026-08-18T09:50:00Z</uptodate_till>
+    <total_mpu_size>0</total_mpu_size>
+    <total_mpu_parts>0</total_mpu_parts>
+  </bucket_billing_info>
+  <next_marker></next_marker>
+</namespace_billing_info>

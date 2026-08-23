@@ -1,0 +1,85 @@
+# ecs-phoenix-ext Deployment — separate pod, never a Phoenix sidecar.
+# Adjust namespace, image tag and resource values before applying.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ecs-phoenix-ext
+  namespace: phoenix
+  labels:
+    app.kubernetes.io/name: ecs-phoenix-ext
+spec:
+  replicas: 1 # multi-replica hysteresis ownership is a later problem
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ecs-phoenix-ext
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ecs-phoenix-ext
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ecs-phoenix-ext
+          image: ghcr.io/fiztoz/ecs-phoenix-ext:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http
+          env:
+            - name: ECS_MGMT_URL
+              value: "https://ecs.example.com:4443"
+            - name: ECS_NAMESPACE
+              value: "prod-ns"
+            - name: ECS_USERNAME
+              value: "ecs-usage"
+            - name: ECS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ecs-phoenix-ext
+                  key: ecs-user-credential
+            - name: ECS_TLS_CA_FILE
+              value: /etc/ecs-ca/ca.pem
+            - name: DATABASE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: ecs-phoenix-ext-db
+                  key: dsn
+            - name: BASE_PATH
+              value: /storage
+            - name: LISTEN_ADDR
+              value: ":80"
+          volumeMounts:
+            - name: ecs-ca
+              mountPath: /etc/ecs-ca
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          livenessProbe:
+            httpGet:
+              path: /storage/health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /storage/health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 60
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: ecs-ca
+          configMap:
+            name: ecs-phoenix-ext-ca

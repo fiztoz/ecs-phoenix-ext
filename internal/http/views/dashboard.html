@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="300">
+<title>ECS Storage — {{.Namespace}}</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b23; --line: #262d3a;
+    --fg: #e8ecf3; --mut: #8b94a7; --ok: #3fb96f; --warn: #e0a63f; --bad: #e05252;
+    --accent: #5b8def;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 48px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline;
+           justify-content: space-between; margin-bottom: 8px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h1 code { color: var(--accent); font-weight: 700; }
+  .sub { color: var(--mut); font-size: 13px; }
+  .summary { display: flex; gap: 24px; background: var(--panel); border: 1px solid var(--line);
+             border-radius: 10px; padding: 14px 18px; margin: 16px 0; flex-wrap: wrap; }
+  .summary .k { color: var(--mut); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .summary .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .flash { background: #1b2a1f; border: 1px solid #2c4a35; color: #bfe6cd;
+           padding: 10px 14px; border-radius: 8px; margin: 12px 0; font-size: 14px; }
+  .alert { background: #2a1b1b; border: 1px solid #4a2c2c; color: #e6bfbf;
+           padding: 10px 14px; border-radius: 8px; margin: 12px 0; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+          border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--line);
+           font-variant-numeric: tabular-nums; }
+  th { color: var(--mut); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: none; }
+  .name { font-weight: 600; }
+  .bar { width: 140px; height: 8px; background: #232a37; border-radius: 4px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--ok); }
+  .bar.over > span { background: var(--bad); }
+  .bar.warn > span { background: var(--warn); }
+  .badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+           border-radius: 999px; text-transform: uppercase; letter-spacing: .03em; }
+  .badge.stale { background: #3a3115; color: var(--warn); }
+  .badge.over { background: #3a1515; color: var(--bad); }
+  .badge.quota-only { background: #15253a; color: var(--accent); }
+  form.inline { display: inline-flex; gap: 6px; align-items: center; }
+  input[type="number"] { width: 90px; background: #0e1116; color: var(--fg);
+           border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  select, button { background: #0e1116; color: var(--fg); border: 1px solid var(--line);
+           border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .ghost { background: none; border-color: transparent; color: var(--mut); }
+  .ghost:hover { color: var(--bad); border-color: var(--bad); }
+  footer { margin-top: 18px; color: var(--mut); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ECS Storage — <code>{{.Namespace}}</code></h1>
+    <span class="sub">wallboard: <a href="{{.BasePath}}/wallboard" style="color:var(--accent)">{{.BasePath}}/wallboard</a></span>
+  </header>
+
+  {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+
+  {{if not .PollOK}}
+    <div class="alert">
+      Last poll failed{{if .LastError}}: {{.LastError}}{{end}}. Showing the last good sample.
+    </div>
+  {{end}}
+
+  <div class="summary">
+    <div><div class="k">Namespace used</div><div class="v">{{.NamespaceUsed}}</div></div>
+    <div><div class="k">Objects</div><div class="v">{{.NamespaceObjects}}</div></div>
+    <div><div class="k">Last poll</div><div class="v" style="font-size:15px">{{if .PolledAt.IsZero}}—{{else}}{{.PolledAt.UTC.Format "2006-01-02 15:04 UTC"}} ({{age .PolledAt .Now}} ago){{end}}</div></div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Bucket</th><th>Used</th><th>Objects</th><th>MPU</th>
+        <th>Quota</th><th>Used %</th><th></th>
+        <th>Sample</th><th>Status</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {{range .Buckets}}
+      <tr>
+        <td class="name">{{.Name}}
+          {{if .QuotaOnly}}<span class="badge quota-only">quota set · not in last poll</span>{{end}}
+        </td>
+        <td>{{if .QuotaOnly}}—{{else}}{{.Used}}{{end}}</td>
+        <td>{{if .QuotaOnly}}—{{else}}{{.Objects}}{{end}}</td>
+        <td>{{if .QuotaOnly}}—{{else}}{{.MPU}}{{end}}</td>
+        <td>
+          {{if .HasQuota}}{{.Quota}}{{else}}
+          <form class="inline" method="post" action="{{$.BasePath}}/">
+            <input type="hidden" name="bucket" value="{{.Name}}">
+            <input type="number" name="quota" min="0" step="any" placeholder="quota" required>
+            <select name="unit">
+              <option value="GiB" selected>GiB</option>
+              <option value="MiB">MiB</option>
+              <option value="TiB">TiB</option>
+            </select>
+            <button type="submit">Set</button>
+          </form>
+          {{end}}
+        </td>
+        <td>{{if .QuotaOnly}}—{{else}}{{if .HasQuota}}{{.Percent}}{{else}}—{{end}}{{end}}</td>
+        <td>{{if and .HasQuota (not .QuotaOnly)}}
+          <div class="bar {{if .ConfirmedOver}}over{{else if ge .BarWidth 80}}warn{{end}}">
+            <span style="width:{{.BarWidth}}%"></span>
+          </div>{{end}}
+        </td>
+        <td class="sub">{{if .QuotaOnly}}—{{else}}{{.SampleTime}}<br>fresh till {{.UptodateTill}}{{end}}</td>
+        <td>
+          {{if .ConfirmedOver}}<span class="badge over">over quota</span>
+          {{else if .Stale}}<span class="badge stale">stale sample</span>
+          {{else if not .QuotaOnly}}<span class="badge" style="background:#15291d;color:var(--ok)">ok</span>{{end}}
+        </td>
+        <td>
+          {{if .HasQuota}}
+          <form class="inline" method="post" action="{{$.BasePath}}/">
+            <input type="hidden" name="bucket" value="{{.Name}}">
+            <input type="hidden" name="action" value="delete">
+            <button type="submit" class="ghost" title="Remove quota">✕</button>
+          </form>{{end}}
+        </td>
+      </tr>
+    {{else}}
+      <tr><td colspan="10" class="sub">No buckets in the last poll yet.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+
+  <footer>
+    Metering is sampled by ECS, not live. Stale threshold applies to <code>uptodate_till</code>.
+    Quotas are operator-set in this tool — ECS has no bucket quota field.
+  </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,26 @@
+# Extension egress: ECS management plane :4443 only (plus DNS).
+# Phoenix's own NetworkPolicy is NOT widened — Phoenix never speaks the
+# management plane.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ecs-phoenix-ext-egress
+  namespace: phoenix
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ecs-phoenix-ext
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8 # narrow to your ECS management subnet
+      ports:
+        - protocol: TCP
+          port: 4443
+    - to: [] # DNS
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
