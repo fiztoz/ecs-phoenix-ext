@@ -106,6 +106,10 @@ Then add Phoenix HTTP monitors against:
 - `{base}/health/ready` — ECS management plane unreachable
 - `{base}/health/quota` — a bucket is confirmed over quota
 
+For the sidebar tab icon, Phoenix can use `{base}/icon.svg` — a
+stroke-drawn `currentColor` bucket with fill level, so it adapts to light
+and dark sidebars.
+
 Quota overage is not an outage: it must not flip the `s3` heartbeat DOWN.
 
 ## Docker
