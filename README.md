@@ -4,7 +4,7 @@ Custom Uptime Phoenix extension: Dell ECS storage usage dashboard /
 wallboard. Phoenix core stays health-only for S3; ECS metering lives here,
 in its own image.
 
-- Go 1.23+, `CGO_ENABLED=0`, stdlib `net/http`, server-rendered templates.
+- Go 1.25+, `CGO_ENABLED=0`, stdlib `net/http`, server-rendered templates.
 - Polls `GET /object/billing/namespace/{ns}/info?include_bucket_detail=true&sizeunit=KB`.
 - Size units are **binary** (API `GB` means GiB; Dell KB 000273649).
 - Quotas are operator-set in this UI (ECS has no bucket quota field) with
@@ -116,8 +116,8 @@ Local:
 make docker            # ghcr.io/fiztoz/ecs-phoenix-ext:dev
 ```
 
-CI (this repo) builds and publishes to GHCR on every push to `main` and on
-version tags:
+CI (this repo) runs `go vet` + fixture tests, then builds and publishes to
+GHCR on every push to `main` and on version tags:
 
 | Ref | Tags |
 |---|---|
@@ -149,3 +149,13 @@ is `golang:1.25-alpine` (Go ≥ 1.25 is required by CGO-free
 fixtures matching the documented field set. If you capture real payloads
 from the lab, redact names if needed but keep the field set, and replace
 these files.
+
+## Nice to have (not planned yet)
+
+Ideas deliberately parked; none are scheduled:
+
+- **Usage history / trends** — a per-poll samples table with retention, so
+  the wallboard could show sparklines instead of current state only.
+- **Prometheus `/metrics`** — used-bytes gauge plus poll success/error
+  counters, next to the existing health endpoints.
+- **Multi-namespace support** — v1 polls exactly one namespace by design.

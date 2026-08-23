@@ -17,6 +17,7 @@ spec:
       labels:
         app.kubernetes.io/name: ecs-phoenix-ext
     spec:
+      automountServiceAccountToken: false # no Kubernetes API access needed
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -60,6 +61,12 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+          startupProbe:
+            httpGet:
+              path: /storage/health/live
+              port: http
+            periodSeconds: 2
+            failureThreshold: 45 # up to 90s before liveness kicks in
           livenessProbe:
             httpGet:
               path: /storage/health/live
