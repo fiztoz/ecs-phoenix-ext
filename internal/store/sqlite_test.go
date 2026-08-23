@@ -72,14 +72,13 @@ func TestSQLiteStateRoundtripUTC(t *testing.T) {
 
 	// Bind a non-UTC zone; the store must normalise to UTC.
 	loc := time.FixedZone("ICT", 7*3600)
-	sample := time.Date(2026, 8, 18, 16, 55, 0, 0, loc) // 09:55 UTC
 	ut := time.Date(2026, 8, 18, 16, 50, 0, 0, loc)
 	polled := time.Date(2026, 8, 18, 17, 0, 0, 0, loc)
 
 	row := StateRow{
 		Namespace: "ns", Bucket: "bkt",
 		UsedBytes: 11811160064, Objects: 2, MPUBytes: 0,
-		SampleTime: &sample, UptodateTill: &ut, PolledAt: polled,
+		UptodateTill: &ut, PolledAt: polled,
 		OverStreak: 1, ConfirmedOver: false, LastError: "",
 	}
 	if err := s.UpsertStates(ctx, []StateRow{row}); err != nil {
@@ -103,11 +102,10 @@ func TestSQLiteStateRoundtripUTC(t *testing.T) {
 	if got.UsedBytes != 11811160064 || got.OverStreak != 2 || !got.ConfirmedOver {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
-	if got.SampleTime == nil || got.UptodateTill == nil {
+	if got.UptodateTill == nil {
 		t.Fatal("nullable times must round-trip")
 	}
 	for name, tt := range map[string]time.Time{
-		"sample_time":   *got.SampleTime,
 		"uptodate_till": *got.UptodateTill,
 		"polled_at":     got.PolledAt,
 	} {
@@ -115,7 +113,34 @@ func TestSQLiteStateRoundtripUTC(t *testing.T) {
 			t.Errorf("%s Location() = %v, want UTC", name, tt.Location())
 		}
 	}
-	if !got.SampleTime.Equal(sample) {
-		t.Errorf("sample instant shifted: %v vs %v", got.SampleTime, sample)
+	if !got.UptodateTill.Equal(ut) {
+		t.Errorf("uptodate instant shifted: %v vs %v", got.UptodateTill, ut)
+	}
+}
+
+func TestSQLiteZeroTimesBindAsNull(t *testing.T) {
+	s := openTestSQLite(t)
+	ctx := context.Background()
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	row := StateRow{
+		Namespace: "ns", Bucket: "bkt",
+		UsedBytes: 1, Objects: 1, MPUBytes: 0,
+		UptodateTill: &time.Time{}, // zero means "no timestamp"
+		PolledAt:     time.Now().UTC(),
+	}
+	if err := s.UpsertStates(ctx, []StateRow{row}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.States(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0].UptodateTill != nil {
+		t.Fatalf("zero/absent times must come back nil, got %+v", rows[0])
 	}
 }

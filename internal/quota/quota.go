@@ -5,8 +5,8 @@ package quota
 
 // Apply advances the hysteresis for one successful sample.
 //
-//	used > quota  → streak++
-//	used <= quota → streak = 0
+//	used >= quota → streak++  (ECS blocks writes once the quota is reached)
+//	used <  quota → streak = 0
 //	confirmed     = streak >= 2
 //
 // A nil quota means the bucket cannot be over; the streak resets.
@@ -14,7 +14,7 @@ func Apply(streak int, quotaBytes *int64, usedBytes int64) (newStreak int, confi
 	if quotaBytes == nil {
 		return 0, false
 	}
-	if usedBytes > *quotaBytes {
+	if usedBytes >= *quotaBytes {
 		streak++
 	} else {
 		streak = 0

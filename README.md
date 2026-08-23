@@ -62,7 +62,7 @@ default CI runs fixture tests only.
 | `DATABASE_ENGINE` | no | inferred | `mariadb` or `sqlite` |
 | `BASE_PATH` | no | `/storage` | Path prefix behind Ingress `/storage` |
 | `PUBLIC_URL` | no | — | Optional absolute URL for logs |
-| `UI_TOKEN` | no | empty | If set, dashboard/API/forms require `Authorization: Bearer …`. Empty means the UI is open to anyone who can reach it. Health stays open either way |
+| `UI_TOKEN` | no | empty | If set, dashboard/API/forms require `Authorization: Bearer …` or a `ui_token` query/form parameter. A valid credential is exchanged for an HttpOnly `SameSite=Lax` session cookie (`ecs_ui_session`, scoped to `BASE_PATH`) so the extension's own links and form posts keep working — this is what makes the Phoenix iframe flow work end-to-end. Empty means the UI is open to anyone who can reach it. Health stays open either way |
 | `LOG_LEVEL` | no | `info` | slog level |
 
 ## MariaDB (dedicated user, manual creation)
@@ -105,6 +105,19 @@ Then add Phoenix HTTP monitors against:
 
 - `{base}/health/ready` — ECS management plane unreachable
 - `{base}/health/quota` — a bucket is confirmed over quota
+
+### Phoenix iframe + UI_TOKEN
+
+Phoenix embeds the dashboard in an iframe via its gated
+`GET /api/extensions/{id}/frame` endpoint. When the Phoenix chart sets
+`extensions[].uiToken` (rendered into Phoenix's `PHOENIX_EXTENSIONS`
+Secret), the redirect arrives once as `{base}/?ui_token=…`; this server
+swaps it for the `ecs_ui_session` cookie, and the wallboard link and quota
+forms then work without the token reappearing in URLs. Only users holding
+Phoenix's `can_view_extensions` capability ever receive the redirect. Note
+that direct navigation to `{base}/` with `UI_TOKEN` set still requires the
+Bearer header or token parameter — this extension authenticates itself;
+Phoenix only gates discovery and launch.
 
 For the sidebar tab icon, Phoenix can use `{base}/icon.svg` — a
 stroke-drawn `currentColor` bucket with fill level, so it adapts to light

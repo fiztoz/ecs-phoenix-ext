@@ -14,7 +14,6 @@ type BillingPayload struct {
 	Namespace        string
 	NamespaceBytes   int64 // namespace-level summary (may not equal bucket sum)
 	NamespaceObjects int64
-	SampleTime       time.Time
 	UptodateTill     time.Time // zero when absent
 	Buckets          []BucketBilling
 	NextMarker       string
@@ -28,7 +27,6 @@ type BucketBilling struct {
 	Objects      int64
 	MPUBytes     int64
 	MPUParts     int64
-	SampleTime   time.Time
 	UptodateTill time.Time // zero when absent
 }
 
@@ -67,7 +65,6 @@ type jsonBucket struct {
 	TotalSize     json.Number `json:"total_size"`
 	TotalSizeUnit string      `json:"total_size_unit"`
 	TotalObjects  int64       `json:"total_objects"`
-	SampleTime    string      `json:"sample_time"`
 	UptodateTill  string      `json:"uptodate_till"`
 	TotalMPUSize  json.Number `json:"total_mpu_size"`
 	TotalMPUParts int64       `json:"total_mpu_parts"`
@@ -79,7 +76,6 @@ type jsonPayload struct {
 	TotalSize     json.Number  `json:"total_size"`
 	TotalSizeUnit string       `json:"total_size_unit"`
 	TotalObjects  int64        `json:"total_objects"`
-	SampleTime    string       `json:"sample_time"`
 	UptodateTill  string       `json:"uptodate_till"`
 	Buckets       []jsonBucket `json:"bucket_billing_info"`
 	NextMarker    string       `json:"next_marker"`
@@ -94,7 +90,6 @@ type xmlBucket struct {
 	TotalSize     string   `xml:"total_size"`
 	TotalSizeUnit string   `xml:"total_size_unit"`
 	TotalObjects  int64    `xml:"total_objects"`
-	SampleTime    string   `xml:"sample_time"`
 	UptodateTill  string   `xml:"uptodate_till"`
 	TotalMPUSize  string   `xml:"total_mpu_size"`
 	TotalMPUParts int64    `xml:"total_mpu_parts"`
@@ -107,7 +102,6 @@ type xmlPayload struct {
 	TotalSize     string      `xml:"total_size"`
 	TotalSizeUnit string      `xml:"total_size_unit"`
 	TotalObjects  int64       `xml:"total_objects"`
-	SampleTime    string      `xml:"sample_time"`
 	UptodateTill  string      `xml:"uptodate_till"`
 	Buckets       []xmlBucket `xml:"bucket_billing_info"`
 	NextMarker    string      `xml:"next_marker"`
@@ -145,16 +139,13 @@ func parseJSON(body []byte) (*BillingPayload, error) {
 	if out.NamespaceBytes, err = ToBytes(total, p.TotalSizeUnit); err != nil {
 		return nil, fmt.Errorf("ecs: namespace total_size: %w", err)
 	}
-	if out.SampleTime, err = parseTime(p.SampleTime); err != nil {
-		return nil, err
-	}
 	if out.UptodateTill, err = parseTime(p.UptodateTill); err != nil {
 		return nil, err
 	}
 	for _, b := range p.Buckets {
 		row, err := convertBucket(b.Name, b.Namespace, out.Namespace,
 			b.TotalSize, b.TotalSizeUnit, b.TotalObjects, b.TotalMPUSize, b.TotalMPUParts,
-			b.SampleTime, b.UptodateTill)
+			b.UptodateTill)
 		if err != nil {
 			return nil, fmt.Errorf("ecs: bucket %q: %w", b.Name, err)
 		}
@@ -183,16 +174,13 @@ func parseXML(body []byte) (*BillingPayload, error) {
 	if out.NamespaceBytes, err = ToBytes(total, p.TotalSizeUnit); err != nil {
 		return nil, fmt.Errorf("ecs: namespace total_size: %w", err)
 	}
-	if out.SampleTime, err = parseTime(p.SampleTime); err != nil {
-		return nil, err
-	}
 	if out.UptodateTill, err = parseTime(p.UptodateTill); err != nil {
 		return nil, err
 	}
 	for _, b := range p.Buckets {
 		row, err := convertBucketStr(b.Name, b.Namespace, out.Namespace,
 			b.TotalSize, b.TotalSizeUnit, b.TotalObjects, b.TotalMPUSize, b.TotalMPUParts,
-			b.SampleTime, b.UptodateTill)
+			b.UptodateTill)
 		if err != nil {
 			return nil, fmt.Errorf("ecs: bucket %q: %w", b.Name, err)
 		}
@@ -214,7 +202,7 @@ func parseFloat(s string) (float64, error) {
 }
 
 func convertBucket(name, ns, parentNS string, size json.Number, unit string, objects int64,
-	mpuSize json.Number, mpuParts int64, sample, uptodate string) (BucketBilling, error) {
+	mpuSize json.Number, mpuParts int64, uptodate string) (BucketBilling, error) {
 	sv, err := num(size)
 	if err != nil {
 		return BucketBilling{}, err
@@ -223,11 +211,11 @@ func convertBucket(name, ns, parentNS string, size json.Number, unit string, obj
 	if err != nil {
 		return BucketBilling{}, err
 	}
-	return buildBucket(name, ns, parentNS, sv, unit, objects, mv, mpuParts, sample, uptodate)
+	return buildBucket(name, ns, parentNS, sv, unit, objects, mv, mpuParts, uptodate)
 }
 
 func convertBucketStr(name, ns, parentNS string, size, unit string, objects int64,
-	mpuSize string, mpuParts int64, sample, uptodate string) (BucketBilling, error) {
+	mpuSize string, mpuParts int64, uptodate string) (BucketBilling, error) {
 	sv, err := parseFloat(size)
 	if err != nil {
 		return BucketBilling{}, err
@@ -236,11 +224,11 @@ func convertBucketStr(name, ns, parentNS string, size, unit string, objects int6
 	if err != nil {
 		return BucketBilling{}, err
 	}
-	return buildBucket(name, ns, parentNS, sv, unit, objects, mv, mpuParts, sample, uptodate)
+	return buildBucket(name, ns, parentNS, sv, unit, objects, mv, mpuParts, uptodate)
 }
 
 func buildBucket(name, ns, parentNS string, size float64, unit string, objects int64,
-	mpuSize float64, mpuParts int64, sample, uptodate string) (BucketBilling, error) {
+	mpuSize float64, mpuParts int64, uptodate string) (BucketBilling, error) {
 	if name == "" {
 		return BucketBilling{}, fmt.Errorf("missing name")
 	}
@@ -249,10 +237,6 @@ func buildBucket(name, ns, parentNS string, size float64, unit string, objects i
 		return BucketBilling{}, err
 	}
 	mpu, err := ToBytes(mpuSize, unit)
-	if err != nil {
-		return BucketBilling{}, err
-	}
-	st, err := parseTime(sample)
 	if err != nil {
 		return BucketBilling{}, err
 	}
@@ -270,7 +254,6 @@ func buildBucket(name, ns, parentNS string, size float64, unit string, objects i
 		Objects:      objects,
 		MPUBytes:     mpu,
 		MPUParts:     mpuParts,
-		SampleTime:   st,
 		UptodateTill: ut,
 	}, nil
 }

@@ -229,11 +229,11 @@ func TestJSONFixture(t *testing.T) {
 	if b.MPUBytes != 0 {
 		t.Errorf("mpu = %d, want 0", b.MPUBytes)
 	}
-	if b.SampleTime.IsZero() || b.UptodateTill.IsZero() {
-		t.Errorf("sample/uptodate times must parse: %v / %v", b.SampleTime, b.UptodateTill)
+	if b.UptodateTill.IsZero() {
+		t.Errorf("uptodate time must parse: %v", b.UptodateTill)
 	}
-	if b.SampleTime.Location() != time.UTC || b.UptodateTill.Location() != time.UTC {
-		t.Errorf("timestamps must be UTC: %v / %v", b.SampleTime.Location(), b.UptodateTill.Location())
+	if b.UptodateTill.Location() != time.UTC {
+		t.Errorf("timestamp must be UTC: %v", b.UptodateTill.Location())
 	}
 }
 

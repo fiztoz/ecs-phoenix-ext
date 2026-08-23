@@ -53,14 +53,13 @@ func (s *SQLite) Migrate(ctx context.Context) error {
 
 const upsertStateSQLite = `
 INSERT INTO ext_ecs_usage_state
-  (namespace, bucket, used_bytes, objects, mpu_bytes, sample_time, uptodate_till,
+  (namespace, bucket, used_bytes, objects, mpu_bytes, uptodate_till,
    polled_at, over_streak, confirmed_over, last_error)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(namespace, bucket) DO UPDATE SET
   used_bytes = excluded.used_bytes,
   objects = excluded.objects,
   mpu_bytes = excluded.mpu_bytes,
-  sample_time = excluded.sample_time,
   uptodate_till = excluded.uptodate_till,
   polled_at = excluded.polled_at,
   over_streak = excluded.over_streak,
@@ -71,7 +70,7 @@ func (s *SQLite) UpsertStates(ctx context.Context, rows []StateRow) error {
 	for _, r := range rows {
 		if _, err := s.db.ExecContext(ctx, upsertStateSQLite,
 			r.Namespace, r.Bucket, r.UsedBytes, r.Objects, r.MPUBytes,
-			bindNullUTC(r.SampleTime), bindNullUTC(r.UptodateTill),
+			bindNullUTC(r.UptodateTill),
 			bindUTC(r.PolledAt), r.OverStreak, r.ConfirmedOver, nullString(r.LastError),
 		); err != nil {
 			return fmt.Errorf("store: upsert state %s/%s: %w", r.Namespace, r.Bucket, err)

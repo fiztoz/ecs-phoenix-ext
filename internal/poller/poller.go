@@ -29,9 +29,9 @@ type BucketState struct {
 	MPUBytes      int64
 	QuotaBytes    *int64 // nil when no quota is set
 	UsedPercent   *float64
-	SampleTime    time.Time
 	UptodateTill  time.Time
 	Stale         bool
+	AtQuota       bool // used >= quota: ECS rejects further writes
 	OverStreak    int
 	ConfirmedOver bool
 }
@@ -98,9 +98,6 @@ func (p *Poller) seedFromState(rows []store.StateRow) {
 			OverStreak:    r.OverStreak,
 			ConfirmedOver: r.ConfirmedOver,
 			Stale:         true, // until a fresh sample proves otherwise
-		}
-		if r.SampleTime != nil {
-			b.SampleTime = *r.SampleTime
 		}
 		if r.UptodateTill != nil {
 			b.UptodateTill = *r.UptodateTill
@@ -172,14 +169,13 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		streak, confirmed := quota.Apply(prev[b.Name], qp, b.UsedBytes)
 
 		// Normalise to UTC before bind — same class of bug Phoenix shipped once.
-		sample, uptodate := b.SampleTime.UTC(), b.UptodateTill.UTC()
+		uptodate := b.UptodateTill.UTC()
 		rows = append(rows, store.StateRow{
 			Namespace:     b.Namespace,
 			Bucket:        b.Name,
 			UsedBytes:     b.UsedBytes,
 			Objects:       b.Objects,
 			MPUBytes:      b.MPUBytes,
-			SampleTime:    &sample,
 			UptodateTill:  &uptodate,
 			PolledAt:      now,
 			OverStreak:    streak,
@@ -193,9 +189,9 @@ func (p *Poller) pollOnce(ctx context.Context) {
 			Objects:       b.Objects,
 			MPUBytes:      b.MPUBytes,
 			QuotaBytes:    qp,
-			SampleTime:    sample.UTC(),
 			UptodateTill:  uptodate.UTC(),
 			Stale:         !uptodate.IsZero() && now.Sub(uptodate) > th,
+			AtQuota:       qp != nil && b.UsedBytes >= *qp,
 			OverStreak:    streak,
 			ConfirmedOver: confirmed,
 		}
@@ -243,6 +239,44 @@ func (p *Poller) Snapshot() Snapshot {
 	cp.Buckets = make([]BucketState, len(p.snap.Buckets))
 	copy(cp.Buckets, p.snap.Buckets)
 	return cp
+}
+
+// RefreshQuotas re-reads quotas from the store and recomputes the quota,
+// percent and hysteresis fields on the current snapshot without waiting for
+// the next poll, so a quota set/delete is visible immediately.
+func (p *Poller) RefreshQuotas(ctx context.Context) {
+	quotas, err := p.store.Quotas(ctx, p.namespace)
+	if err != nil {
+		p.log.Warn("poller: refresh quotas lookup failed", "err", err)
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.snap.PollOK {
+		return // nothing polled yet; next poll will apply quotas
+	}
+	prev := make(map[string]int, len(p.snap.Buckets))
+	for _, b := range p.snap.Buckets {
+		prev[b.Name] = b.OverStreak
+	}
+	for i, b := range p.snap.Buckets {
+		var qp *int64
+		if q, ok := quotas[b.Name]; ok {
+			v := q.QuotaBytes
+			qp = &v
+		}
+		streak, confirmed := quota.Apply(prev[b.Name], qp, b.UsedBytes)
+		p.snap.Buckets[i].QuotaBytes = qp
+		p.snap.Buckets[i].UsedPercent = nil
+		p.snap.Buckets[i].AtQuota = qp != nil && b.UsedBytes >= *qp
+		p.snap.Buckets[i].OverStreak = streak
+		p.snap.Buckets[i].ConfirmedOver = confirmed
+		if qp != nil && *qp > 0 {
+			pct := float64(b.UsedBytes) / float64(*qp) * 100
+			p.snap.Buckets[i].UsedPercent = &pct
+		}
+	}
 }
 
 // PollOnce runs a single poll synchronously (used by tests and startup).

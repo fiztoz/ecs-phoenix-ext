@@ -27,30 +27,43 @@ func Migrate(ctx context.Context, db *sql.DB, migrations fs.FS) error {
 	if err := row.Scan(&current); err != nil {
 		return fmt.Errorf("store: read schema version: %w", err)
 	}
-	if current >= 1 {
-		return nil
-	}
 
-	sqlBytes, err := fs.ReadFile(migrations, "migrations/001_init.up.sql")
-	if err != nil {
-		return fmt.Errorf("store: read 001_init.up.sql: %w", err)
+	// migrations are sequential: 001_init.up.sql, 002_*.up.sql, ...
+	type migration struct {
+		version int
+		file    string
 	}
-	if _, err := db.ExecContext(ctx, string(sqlBytes)); err != nil {
-		return fmt.Errorf("store: apply 001_init: %w", err)
+	all := []migration{
+		{1, "migrations/001_init.up.sql"},
+		{2, "migrations/002_drop_sample_time.up.sql"},
 	}
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO `+schemaTable+` (version, applied_at) VALUES (?, ?)`,
-		1, time.Now().UTC(),
-	); err != nil {
-		return fmt.Errorf("store: record schema version: %w", err)
+	for _, m := range all {
+		if current >= m.version {
+			continue
+		}
+		sqlBytes, err := fs.ReadFile(migrations, m.file)
+		if err != nil {
+			return fmt.Errorf("store: read %s: %w", m.file, err)
+		}
+		if _, err := db.ExecContext(ctx, string(sqlBytes)); err != nil {
+			return fmt.Errorf("store: apply %s: %w", m.file, err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO `+schemaTable+` (version, applied_at) VALUES (?, ?)`,
+			m.version, time.Now().UTC(),
+		); err != nil {
+			return fmt.Errorf("store: record schema version %d: %w", m.version, err)
+		}
 	}
 	return nil
 }
 
 func bindUTC(t time.Time) time.Time { return t.UTC() }
 
+// bindNullUTC maps the zero time to SQL NULL so ECS's "no timestamp" never
+// lands in a TIMESTAMP column (MariaDB zero dates break parseTime=true).
 func bindNullUTC(t *time.Time) any {
-	if t == nil {
+	if t == nil || t.IsZero() {
 		return nil
 	}
 	return t.UTC()
@@ -74,8 +87,8 @@ func scanTime(v any) (*time.Time, error) {
 
 func parseScanTime(s string) (*time.Time, error) {
 	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil, nil
+	if s == "" || strings.HasPrefix(s, "0000-00-00") {
+		return nil, nil // legacy zero-date rows mean "no timestamp"
 	}
 	for _, layout := range []string{
 		time.RFC3339Nano,

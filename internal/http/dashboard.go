@@ -24,10 +24,8 @@ type bucketView struct {
 	QuotaBytes    int64
 	Percent       string
 	BarWidth      int
-	SampleTime    string
-	SampleUnix    int64 // -1 when no sample (quota-only)
-	UptodateTill  string
 	Stale         bool
+	AtQuota       bool // used >= quota: ECS rejects further writes
 	OverStreak    int
 	ConfirmedOver bool
 	QuotaOnly     bool // quota set but not in last poll
@@ -86,7 +84,6 @@ func (s *Server) buildDashboard(r *http.Request) dashboardData {
 				HasQuota:   true,
 				Quota:      HumanBytes(q.QuotaBytes),
 				QuotaBytes: q.QuotaBytes,
-				SampleUnix: -1,
 				QuotaOnly:  true,
 			}
 			data.Buckets = append(data.Buckets, v)
@@ -96,48 +93,58 @@ func (s *Server) buildDashboard(r *http.Request) dashboardData {
 }
 
 func toBucketView(b poller.BucketState) bucketView {
-	v := bucketView{
+	return bucketView{
 		Name:          b.Name,
 		Used:          HumanBytes(b.UsedBytes),
 		UsedBytes:     b.UsedBytes,
 		Objects:       b.Objects,
 		MPU:           HumanBytes(b.MPUBytes),
 		MPUBytes:      b.MPUBytes,
-		SampleTime:    b.SampleTime.UTC().Format("2006-01-02 15:04 UTC"),
-		SampleUnix:    sampleUnix(b.SampleTime),
 		Stale:         b.Stale,
+		AtQuota:       b.AtQuota,
 		OverStreak:    b.OverStreak,
 		ConfirmedOver: b.ConfirmedOver,
+		QuotaBytes:    quotaBytesOrZero(b.QuotaBytes),
+		HasQuota:      b.QuotaBytes != nil,
+		Quota:         quotaOrDash(b.QuotaBytes),
+		Percent:       percentOrDash(b.UsedPercent),
+		BarWidth:      barWidth(b.UsedPercent),
 	}
-	if b.UptodateTill.IsZero() {
-		v.UptodateTill = "—"
-	} else {
-		v.UptodateTill = b.UptodateTill.UTC().Format("2006-01-02 15:04 UTC")
-	}
-	if b.QuotaBytes != nil {
-		v.HasQuota = true
-		v.QuotaBytes = *b.QuotaBytes
-		v.Quota = HumanBytes(*b.QuotaBytes)
-	}
-	if b.UsedPercent != nil {
-		v.Percent = pctStr(*b.UsedPercent)
-		w := int(*b.UsedPercent)
-		if w > 100 {
-			w = 100
-		}
-		if w < 0 {
-			w = 0
-		}
-		v.BarWidth = w
-	}
-	return v
 }
 
-func sampleUnix(t time.Time) int64 {
-	if t.IsZero() {
-		return -1
+func quotaBytesOrZero(q *int64) int64 {
+	if q == nil {
+		return 0
 	}
-	return t.Unix()
+	return *q
+}
+
+func quotaOrDash(q *int64) string {
+	if q == nil {
+		return "—"
+	}
+	return HumanBytes(*q)
+}
+
+func percentOrDash(p *float64) string {
+	if p == nil {
+		return "—"
+	}
+	return pctStr(*p)
+}
+
+func barWidth(p *float64) int {
+	if p == nil {
+		return 0
+	}
+	w := int(*p)
+	if w > 100 {
+		w = 100
+	}
+	if w < 0 {
+		w = 0
+	}
+	return w
 }
 
 func pctStr(p float64) string {
@@ -168,6 +175,7 @@ func (s *Server) handleQuotaForm(w http.ResponseWriter, r *http.Request) {
 			redirect("error: could not delete quota")
 			return
 		}
+		s.refreshQuotas(r)
 		redirect("quota removed for " + bucket)
 		return
 	}
@@ -191,6 +199,7 @@ func (s *Server) handleQuotaForm(w http.ResponseWriter, r *http.Request) {
 		redirect("error: could not save quota")
 		return
 	}
+	s.refreshQuotas(r)
 	redirect("quota set for " + bucket + ": " + HumanBytes(bytes))
 }
 

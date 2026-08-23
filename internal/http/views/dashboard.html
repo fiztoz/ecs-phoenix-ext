@@ -98,10 +98,11 @@
            margin:0.75rem 0; font-size:0.875rem; }
 
   /* Table */
-  table { width:100%; border-collapse:collapse; background:var(--card);
-          border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
+  .table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; background:var(--card);
+                border:1px solid var(--border); border-radius:var(--radius); }
+  table { width:100%; border-collapse:collapse; min-width:920px; }
   th, td { padding:0.625rem 0.75rem; text-align:left; border-bottom:1px solid var(--border);
-           font-variant-numeric:tabular-nums; }
+           font-variant-numeric:tabular-nums; white-space:nowrap; }
   th { color:var(--faint); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.04em; font-weight:500; }
   th.sortable { cursor:pointer; user-select:none; white-space:nowrap; }
   th.sortable:hover { color:var(--fg); }
@@ -121,6 +122,7 @@
   .badge { display:inline-flex; align-items:center; gap:0.25rem; font-size:0.6875rem; font-weight:600;
            padding:0.125rem 0.5rem; border-radius:999px; text-transform:uppercase; letter-spacing:0.03em; }
   .badge.stale { background:oklch(0.8 0.16 80 / 0.12); color:var(--warning); }
+  .badge.atquota { background:oklch(0.8 0.16 80 / 0.12); color:var(--warning); }
   .badge.over { background:oklch(0.64 0.21 25 / 0.12); color:var(--danger); }
   .badge.ok { background:oklch(0.74 0.17 155 / 0.12); color:var(--success); }
   .badge.quota-only { background:oklch(0.72 0.13 250 / 0.12); color:var(--info); }
@@ -195,6 +197,7 @@
     <div><div class="k">Last poll</div><div class="v" style="font-size:0.9375rem">{{if .PolledAt.IsZero}}—{{else}}{{.PolledAt.UTC.Format "2006-01-02 15:04 UTC"}} ({{age .PolledAt .Now}} ago){{end}}</div></div>
   </div>
 
+  <div class="table-wrap">
   <table>
     <thead>
       <tr>
@@ -205,7 +208,6 @@
         <th class="sortable" data-key="quota">Quota<span class="arrow"></span></th>
         <th class="sortable" data-key="percent">Used %<span class="arrow"></span></th>
         <th></th>
-        <th class="sortable" data-key="sample">Sample<span class="arrow"></span></th>
         <th class="sortable" data-key="status">Status<span class="arrow"></span></th>
         <th></th>
       </tr>
@@ -217,8 +219,7 @@
           data-mpu="{{if .QuotaOnly}}-1{{else}}{{.MPUBytes}}{{end}}"
           data-quota="{{if .HasQuota}}{{.QuotaBytes}}{{else}}-1{{end}}"
           data-percent="{{if .HasQuota}}{{if .ConfirmedOver}}9999{{else}}{{.BarWidth}}{{end}}{{else}}-1{{end}}"
-          data-sample="{{.SampleUnix}}"
-          data-status="{{if .ConfirmedOver}}over{{else if .Stale}}stale{{else if .QuotaOnly}}quota-only{{else}}ok{{end}}">
+          data-status="{{if .ConfirmedOver}}over{{else if .AtQuota}}atquota{{else if .Stale}}stale{{else if .QuotaOnly}}quota-only{{else}}ok{{end}}">
         <td class="name">{{.Name}}
           {{if .QuotaOnly}}<span class="badge quota-only">quota set · not in last poll</span>{{end}}
         </td>
@@ -241,13 +242,13 @@
         </td>
         <td>{{if .QuotaOnly}}—{{else}}{{if .HasQuota}}{{.Percent}}{{else}}—{{end}}{{end}}</td>
         <td>{{if and .HasQuota (not .QuotaOnly)}}
-          <div class="bar {{if .ConfirmedOver}}over{{else if ge .BarWidth 80}}warn{{end}}">
+          <div class="bar {{if or .ConfirmedOver .AtQuota}}over{{else if ge .BarWidth 80}}warn{{end}}">
             <span style="width:{{.BarWidth}}%"></span>
           </div>{{end}}
         </td>
-        <td class="sub">{{if .QuotaOnly}}—{{else}}{{.SampleTime}}<br>fresh till {{.UptodateTill}}{{end}}</td>
         <td>
           {{if .ConfirmedOver}}<span class="badge over"><span class="dot dot-bad"></span> over quota</span>
+          {{else if .AtQuota}}<span class="badge atquota"><span class="dot dot-warn"></span> at quota</span>
           {{else if .Stale}}<span class="badge stale"><span class="dot dot-warn"></span> stale sample</span>
           {{else if not .QuotaOnly}}<span class="badge ok"><span class="dot dot-up"></span> ok</span>{{end}}
         </td>
@@ -261,13 +262,15 @@
         </td>
       </tr>
     {{else}}
-      <tr class="empty-row"><td colspan="10" class="sub">No buckets in the last poll yet.</td></tr>
+      <tr class="empty-row"><td colspan="9" class="sub">No buckets in the last poll yet.</td></tr>
     {{end}}
     </tbody>
   </table>
+  </div>
 
   <footer>
-    Metering is sampled by ECS, not live. Stale threshold applies to <code>uptodate_till</code>.
+    Metering is sampled by ECS, not live. A bucket is marked stale when its last
+    good sample is older than the freshness window.
     Quotas are operator-set in this tool — ECS has no bucket quota field.
   </footer>
 </div>
@@ -289,8 +292,8 @@
     function getVal(row, key) {
       if (key === 'name') return row.dataset.name.toLowerCase();
       if (key === 'status') {
-        var order = { 'over': 0, 'stale': 1, 'ok': 2, 'quota-only': 3 };
-        return order[row.dataset.status] != null ? order[row.dataset.status] : 4;
+        var order = { 'over': 0, 'atquota': 1, 'stale': 2, 'ok': 3, 'quota-only': 4 };
+        return order[row.dataset.status] != null ? order[row.dataset.status] : 5;
       }
       return parseNum(row.dataset[key]);
     }

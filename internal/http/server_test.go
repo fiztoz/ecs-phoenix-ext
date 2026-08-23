@@ -55,7 +55,6 @@ func goodSnapshot() poller.Snapshot {
 			Objects:      2,
 			QuotaBytes:   &q,
 			UsedPercent:  &pct,
-			SampleTime:   time.Date(2026, 8, 18, 9, 55, 0, 0, time.UTC),
 			UptodateTill: time.Date(2026, 8, 18, 9, 50, 0, 0, time.UTC),
 		}},
 	}
@@ -91,7 +90,7 @@ func TestAPIBucketsWireShape(t *testing.T) {
 	buckets := body["buckets"].([]any)
 	b0 := buckets[0].(map[string]any)
 	for _, key := range []string{"name", "used_bytes", "objects", "mpu_bytes", "quota_bytes",
-		"used_percent", "sample_time", "uptodate_till", "stale", "over_streak", "confirmed_over"} {
+		"used_percent", "stale", "at_quota", "over_streak", "confirmed_over"} {
 		if _, ok := b0[key]; !ok {
 			t.Errorf("bucket missing snake_case key %q", key)
 		}
@@ -213,6 +212,89 @@ func TestUITokenGuard(t *testing.T) {
 	}
 }
 
+// The Phoenix iframe flow: the gated /frame redirect arrives once with the
+// credential in the query, and every later navigation (wallboard link, form
+// POST) must keep working off the exchanged session cookie alone.
+func TestUITokenCookieExchange(t *testing.T) {
+	s := newTestServer(t, goodSnapshot(), store.NewMem(), "test-ui-value")
+	h := s.Handler()
+
+	// Hand-off: ui_token query parameter authenticates and sets the cookie.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/?ui_token=test-ui-value", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ui_token hand-off = %d, want 200", rr.Code)
+	}
+	var session *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "ecs_ui_session" {
+			session = c
+		}
+	}
+	if session == nil {
+		t.Fatal("hand-off did not set the ecs_ui_session cookie")
+	}
+	if !session.HttpOnly {
+		t.Error("session cookie must be HttpOnly")
+	}
+	if session.SameSite != http.SameSiteLaxMode {
+		t.Errorf("session cookie SameSite = %v, want Lax", session.SameSite)
+	}
+
+	// Follow-up navigation with ONLY the cookie — no token in the URL.
+	for _, path := range []string{"/", "/wallboard", "/api/buckets"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(session)
+		rr = httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Errorf("cookie-authenticated GET %s = %d, want 200", path, rr.Code)
+		}
+	}
+
+	// A wrong cookie value is rejected.
+	req := httptest.NewRequest(http.MethodGet, "/api/buckets", nil)
+	req.AddCookie(&http.Cookie{Name: "ecs_ui_session", Value: "wrong"})
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("wrong cookie = %d, want 401", rr.Code)
+	}
+
+	// Bearer hand-off also sets the cookie.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer test-ui-value")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("bearer hand-off = %d, want 200", rr.Code)
+	}
+	found := false
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "ecs_ui_session" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("bearer hand-off did not set the session cookie")
+	}
+}
+
+// With UI_TOKEN unset no cookie is ever issued — the UI is open.
+func TestUITokenCookieNotSetWhenOpen(t *testing.T) {
+	s := newTestServer(t, goodSnapshot(), store.NewMem(), "")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("open UI = %d, want 200", rr.Code)
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "ecs_ui_session" {
+			t.Fatal("session cookie set although UI_TOKEN is empty")
+		}
+	}
+}
+
 func TestQuotaAPIValidation(t *testing.T) {
 	mem := store.NewMem()
 	s := newTestServer(t, goodSnapshot(), mem, "")
@@ -313,6 +395,22 @@ func TestDashboardRenders(t *testing.T) {
 	}
 	if strings.Contains(body, "11 GB") {
 		t.Error("dashboard must render binary units (GiB), not GB")
+	}
+}
+
+func TestDashboardZeroTimesRenderAsDash(t *testing.T) {
+	snap := goodSnapshot()
+	snap.Buckets[0].UptodateTill = time.Time{}
+	s := newTestServer(t, snap, store.NewMem(), "")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("dashboard = %d", rr.Code)
+	}
+	for _, banned := range []string{"0001-01-01", "0000-00-00"} {
+		if strings.Contains(rr.Body.String(), banned) {
+			t.Errorf("dashboard renders zero time as %q", banned)
+		}
 	}
 }
 

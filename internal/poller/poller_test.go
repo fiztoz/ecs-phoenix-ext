@@ -37,20 +37,17 @@ func quietLog() *slog.Logger {
 }
 
 func payload(usedBytes int64, uptodateAgo time.Duration, now time.Time) *ecs.BillingPayload {
-	sample := now.Add(-time.Minute).UTC()
 	ut := now.Add(-uptodateAgo).UTC()
 	return &ecs.BillingPayload{
 		Namespace:        "prod-ns",
 		NamespaceBytes:   usedBytes,
 		NamespaceObjects: 1,
-		SampleTime:       sample,
 		UptodateTill:     ut,
 		Buckets: []ecs.BucketBilling{{
 			Name:         "bkt-one",
 			Namespace:    "prod-ns",
 			UsedBytes:    usedBytes,
 			Objects:      1,
-			SampleTime:   sample,
 			UptodateTill: ut,
 		}},
 	}
@@ -203,36 +200,90 @@ func TestNoQuotaNeverConfirmed(t *testing.T) {
 	}
 }
 
+func TestRefreshQuotasUpdatesSnapshotImmediately(t *testing.T) {
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	mem := store.NewMem()
+	src := &fakeSource{results: []pollResult{
+		{payload: payload(100, 0, now)},
+		{payload: payload(100, 0, now)},
+	}}
+	p := newTestPoller(t, src, mem, now)
+	p.PollOnce(context.Background())
+
+	// Set a quota below used: visible on the snapshot without a new poll,
+	// but one sample alone must not confirm the alarm.
+	if err := mem.SetQuota(context.Background(), "prod-ns", "bkt-one", 50); err != nil {
+		t.Fatal(err)
+	}
+	p.RefreshQuotas(context.Background())
+	b := p.Snapshot().Buckets[0]
+	if b.QuotaBytes == nil || *b.QuotaBytes != 50 {
+		t.Fatalf("quota not visible after refresh: %+v", b)
+	}
+	if b.UsedPercent == nil || *b.UsedPercent != 200 {
+		t.Fatalf("percent = %v, want 200%%", b.UsedPercent)
+	}
+	if b.ConfirmedOver || b.OverStreak != 1 {
+		t.Fatalf("one sample must not confirm: %+v", b)
+	}
+
+	// The next poll keeps the hysteresis going (sample 2 confirms).
+	p.PollOnce(context.Background())
+	if b := p.Snapshot().Buckets[0]; !b.ConfirmedOver {
+		t.Fatalf("second over sample must confirm: %+v", b)
+	}
+
+	// Deleting the quota clears it from the snapshot right away.
+	if err := mem.DeleteQuota(context.Background(), "prod-ns", "bkt-one"); err != nil {
+		t.Fatal(err)
+	}
+	p.RefreshQuotas(context.Background())
+	b = p.Snapshot().Buckets[0]
+	if b.QuotaBytes != nil || b.UsedPercent != nil || b.ConfirmedOver || b.OverStreak != 0 {
+		t.Fatalf("quota delete not reflected: %+v", b)
+	}
+}
+
+func TestRefreshQuotasBeforeFirstPollIsNoop(t *testing.T) {
+	mem := store.NewMem()
+	if err := mem.SetQuota(context.Background(), "prod-ns", "bkt-one", 50); err != nil {
+		t.Fatal(err)
+	}
+	p := New(context.Background(), &fakeSource{}, mem, "prod-ns", 15*time.Minute, quietLog())
+	p.RefreshQuotas(context.Background()) // must not panic or seed buckets
+	if snap := p.Snapshot(); len(snap.Buckets) != 0 {
+		t.Fatalf("refresh before poll must not add buckets: %+v", snap)
+	}
+}
+
 func TestTimestampsAreUTC(t *testing.T) {
-	// Feed a +07:00 zoned sample; bound timestamps must come out UTC.
+	// Feed a +07:00 zoned timestamp; bound timestamps must come out UTC.
 	loc := time.FixedZone("ICT", 7*3600)
 	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
-	sample := time.Date(2026, 8, 18, 16, 55, 0, 0, loc) // == 09:55 UTC
 	ut := time.Date(2026, 8, 18, 16, 50, 0, 0, loc)
 	src := &fakeSource{results: []pollResult{{payload: &ecs.BillingPayload{
 		Namespace:    "prod-ns",
-		SampleTime:   sample,
 		UptodateTill: ut,
 		Buckets: []ecs.BucketBilling{{
 			Name: "bkt-one", Namespace: "prod-ns", UsedBytes: 1,
-			SampleTime: sample, UptodateTill: ut,
+			UptodateTill: ut,
 		}},
 	}}}}
 	p := newTestPoller(t, src, store.NewMem(), now)
 	p.PollOnce(context.Background())
 
 	b := p.Snapshot().Buckets[0]
-	if b.SampleTime.Location() != time.UTC || b.UptodateTill.Location() != time.UTC {
-		t.Fatalf("bound timestamps must be UTC: %v / %v", b.SampleTime.Location(), b.UptodateTill.Location())
+	if b.UptodateTill.Location() != time.UTC {
+		t.Fatalf("bound timestamp must be UTC: %v", b.UptodateTill.Location())
 	}
-	if !b.SampleTime.Equal(sample) {
-		t.Fatalf("sample instant shifted: %v vs %v", b.SampleTime, sample)
+	if !b.UptodateTill.Equal(ut) {
+		t.Fatalf("uptodate instant shifted: %v vs %v", b.UptodateTill, ut)
 	}
 	rows, _ := p.store.States(context.Background())
 	if len(rows) != 1 {
 		t.Fatalf("states = %d", len(rows))
 	}
-	if rows[0].SampleTime.Location() != time.UTC || rows[0].PolledAt.Location() != time.UTC {
+	if rows[0].UptodateTill == nil || rows[0].UptodateTill.Location() != time.UTC || rows[0].PolledAt.Location() != time.UTC {
 		t.Fatalf("persisted timestamps must be UTC")
 	}
 }

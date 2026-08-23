@@ -18,7 +18,8 @@ func TestApply(t *testing.T) {
 		{"second over sample confirms", 1, i64(100), 200, 2, true},
 		{"third over sample stays confirmed", 2, i64(100), 200, 3, true},
 		{"under resets streak", 2, i64(100), 50, 0, false},
-		{"equal to quota is not over", 1, i64(100), 100, 0, false},
+		{"first equal sample counts as over", 0, i64(100), 100, 1, false},
+		{"equal to quota confirms on second sample", 1, i64(100), 100, 2, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

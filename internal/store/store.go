@@ -14,7 +14,6 @@ type StateRow struct {
 	UsedBytes     int64
 	Objects       int64
 	MPUBytes      int64
-	SampleTime    *time.Time // nil when ECS omitted it
 	UptodateTill  *time.Time // nil when ECS omitted it
 	PolledAt      time.Time
 	OverStreak    int

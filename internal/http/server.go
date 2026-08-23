@@ -3,6 +3,7 @@
 package http
 
 import (
+	"context"
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
@@ -24,6 +25,18 @@ var assets embed.FS
 type SnapshotSource interface {
 	Snapshot() poller.Snapshot
 	StaleThreshold() time.Duration
+}
+
+// quotaRefresher is optionally implemented by SnapshotSource (the poller does)
+// so quota mutations become visible without waiting for the next poll.
+type quotaRefresher interface {
+	RefreshQuotas(ctx context.Context)
+}
+
+func (s *Server) refreshQuotas(r *http.Request) {
+	if qf, ok := s.deps.Snapshots.(quotaRefresher); ok {
+		qf.RefreshQuotas(r.Context())
+	}
 }
 
 // Deps wires the server.
@@ -134,10 +147,23 @@ func (s *Server) securityHeaders(next http.HandlerFunc) http.HandlerFunc {
 // uiAuth guards dashboard/API/form routes when UI_TOKEN is configured.
 // Health endpoints are deliberately NOT behind this guard: Phoenix HTTP
 // monitors hit them without a Bearer token.
+//
+// Credential hand-off: a valid Authorization: Bearer or ui_token parameter
+// (the form Phoenix's gated /frame redirect uses) is exchanged for a session
+// cookie, because the extension's own links and form posts cannot carry the
+// token forward. The iframe embedding Phoenix is same-host, so the cookie is
+// first-party; SameSite=Lax keeps cross-site top-level POSTs from replaying
+// it.
 func (s *Server) uiAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		want := s.deps.UIToken
 		if want == "" {
+			next(w, r)
+			return
+		}
+		// Session cookie from an earlier hand-off.
+		if c, err := r.Cookie(uiCookieName); err == nil &&
+			subtle.ConstantTimeCompare([]byte(c.Value), []byte(want)) == 1 {
 			next(w, r)
 			return
 		}
@@ -156,8 +182,32 @@ func (s *Server) uiAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// Valid credential: swap it for the session cookie so follow-up
+		// navigations inside the extension stay authenticated without the
+		// token reappearing in URLs.
+		http.SetCookie(w, &http.Cookie{
+			Name:     uiCookieName,
+			Value:    want,
+			Path:     uiCookiePath(s.deps.BasePath),
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   12 * 60 * 60,
+		})
 		next(w, r)
 	}
+}
+
+// uiCookieName is the session cookie set after a successful UI_TOKEN hand-off.
+const uiCookieName = "ecs_ui_session"
+
+// uiCookiePath scopes the session cookie to the extension's Ingress prefix so
+// it is never sent to Phoenix or sibling extensions on the same host.
+func uiCookiePath(basePath string) string {
+	p := strings.TrimRight(basePath, "/")
+	if p == "" {
+		return "/"
+	}
+	return p
 }
 
 func bearerToken(r *http.Request) string {
@@ -233,18 +283,17 @@ func (s *Server) handleIcon(w http.ResponseWriter, _ *http.Request) {
 // --- JSON API ---
 
 type apiBucket struct {
-	Name          string     `json:"name"`
-	Namespace     string     `json:"namespace"`
-	UsedBytes     int64      `json:"used_bytes"`
-	Objects       int64      `json:"objects"`
-	MPUBytes      int64      `json:"mpu_bytes"`
-	QuotaBytes    *int64     `json:"quota_bytes"` // null when unset
-	UsedPercent   *float64   `json:"used_percent"`
-	SampleTime    *time.Time `json:"sample_time"`
-	UptodateTill  *time.Time `json:"uptodate_till"`
-	Stale         bool       `json:"stale"`
-	OverStreak    int        `json:"over_streak"`
-	ConfirmedOver bool       `json:"confirmed_over"`
+	Name          string   `json:"name"`
+	Namespace     string   `json:"namespace"`
+	UsedBytes     int64    `json:"used_bytes"`
+	Objects       int64    `json:"objects"`
+	MPUBytes      int64    `json:"mpu_bytes"`
+	QuotaBytes    *int64   `json:"quota_bytes"` // null when unset
+	UsedPercent   *float64 `json:"used_percent"`
+	Stale         bool     `json:"stale"`
+	AtQuota       bool     `json:"at_quota"`
+	OverStreak    int      `json:"over_streak"`
+	ConfirmedOver bool     `json:"confirmed_over"`
 }
 
 type apiResponse struct {
@@ -280,16 +329,9 @@ func (s *Server) handleAPIBuckets(w http.ResponseWriter, _ *http.Request) {
 			QuotaBytes:    b.QuotaBytes,
 			UsedPercent:   b.UsedPercent,
 			Stale:         b.Stale,
+			AtQuota:       b.AtQuota,
 			OverStreak:    b.OverStreak,
 			ConfirmedOver: b.ConfirmedOver,
-		}
-		if !b.SampleTime.IsZero() {
-			t := b.SampleTime.UTC()
-			ab.SampleTime = &t
-		}
-		if !b.UptodateTill.IsZero() {
-			t := b.UptodateTill.UTC()
-			ab.UptodateTill = &t
 		}
 		resp.Buckets = append(resp.Buckets, ab)
 	}
@@ -343,6 +385,7 @@ func (s *Server) setQuota(w http.ResponseWriter, r *http.Request, q quotaRequest
 		writeJSONErr(w, http.StatusInternalServerError, "store error")
 		return
 	}
+	s.refreshQuotas(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"namespace":   q.Namespace,
 		"bucket":      q.Bucket,
@@ -366,6 +409,7 @@ func (s *Server) handleAPIDeleteQuota(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusInternalServerError, "store error")
 		return
 	}
+	s.refreshQuotas(r)
 	w.WriteHeader(http.StatusNoContent)
 }
 

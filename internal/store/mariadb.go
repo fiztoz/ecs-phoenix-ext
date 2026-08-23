@@ -53,14 +53,13 @@ func (m *MariaDB) Migrate(ctx context.Context) error {
 
 const upsertStateMaria = `
 INSERT INTO ext_ecs_usage_state
-  (namespace, bucket, used_bytes, objects, mpu_bytes, sample_time, uptodate_till,
+  (namespace, bucket, used_bytes, objects, mpu_bytes, uptodate_till,
    polled_at, over_streak, confirmed_over, last_error)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   used_bytes = VALUES(used_bytes),
   objects = VALUES(objects),
   mpu_bytes = VALUES(mpu_bytes),
-  sample_time = VALUES(sample_time),
   uptodate_till = VALUES(uptodate_till),
   polled_at = VALUES(polled_at),
   over_streak = VALUES(over_streak),
@@ -71,7 +70,7 @@ func (m *MariaDB) UpsertStates(ctx context.Context, rows []StateRow) error {
 	for _, r := range rows {
 		if _, err := m.db.ExecContext(ctx, upsertStateMaria,
 			r.Namespace, r.Bucket, r.UsedBytes, r.Objects, r.MPUBytes,
-			bindNullUTC(r.SampleTime), bindNullUTC(r.UptodateTill),
+			bindNullUTC(r.UptodateTill),
 			bindUTC(r.PolledAt), r.OverStreak, r.ConfirmedOver, nullString(r.LastError),
 		); err != nil {
 			return fmt.Errorf("store: upsert state %s/%s: %w", r.Namespace, r.Bucket, err)
@@ -81,7 +80,7 @@ func (m *MariaDB) UpsertStates(ctx context.Context, rows []StateRow) error {
 }
 
 const selectStates = `
-SELECT namespace, bucket, used_bytes, objects, mpu_bytes, sample_time, uptodate_till,
+SELECT namespace, bucket, used_bytes, objects, mpu_bytes, uptodate_till,
        polled_at, over_streak, confirmed_over, COALESCE(last_error, '')
 FROM ext_ecs_usage_state`
 
@@ -128,14 +127,11 @@ func queryStates(ctx context.Context, db *sql.DB) ([]StateRow, error) {
 	var out []StateRow
 	for rows.Next() {
 		var r StateRow
-		var sample, uptodate, polled any
+		var uptodate, polled any
 		var confirmed int
 		if err := rows.Scan(&r.Namespace, &r.Bucket, &r.UsedBytes, &r.Objects, &r.MPUBytes,
-			&sample, &uptodate, &polled, &r.OverStreak, &confirmed, &r.LastError); err != nil {
+			&uptodate, &polled, &r.OverStreak, &confirmed, &r.LastError); err != nil {
 			return nil, fmt.Errorf("store: scan state: %w", err)
-		}
-		if r.SampleTime, err = scanTime(sample); err != nil {
-			return nil, err
 		}
 		if r.UptodateTill, err = scanTime(uptodate); err != nil {
 			return nil, err
