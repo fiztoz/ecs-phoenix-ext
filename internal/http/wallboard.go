@@ -37,7 +37,7 @@ func (s *Server) handleWallboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Severity first, like the uptime-phoenix wallboard: over-quota cards
-	// before at-quota before stale before ok; name order within each tier.
+	// before yellow-80% before at-quota before stale before ok; name order within each tier.
 	sort.SliceStable(data.Buckets, func(i, j int) bool {
 		si, sj := severityRank(data.Buckets[i]), severityRank(data.Buckets[j])
 		if si != sj {
@@ -55,12 +55,14 @@ func (s *Server) handleWallboard(w http.ResponseWriter, r *http.Request) {
 func severityRank(b bucketView) int {
 	switch {
 	case b.ConfirmedOver:
-		return 0
+		return 0 // over quota - highest priority
+	case b.BarWidth >= 80:
+		return 1 // yellow warning at 80% - after over quota
 	case b.AtQuota:
-		return 1
+		return 2 // at quota
 	case b.Stale:
-		return 2
+		return 3 // stale data
 	default:
-		return 3
+		return 4 // ok/green UP
 	}
 }

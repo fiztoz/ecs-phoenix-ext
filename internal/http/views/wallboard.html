@@ -120,6 +120,7 @@
   .card.over { border-color:oklch(0.64 0.21 25 / 0.45); background:oklch(0.64 0.21 25 / 0.055); }
   .card.stale { border-color:oklch(0.8 0.16 80 / 0.4); background:oklch(0.8 0.16 80 / 0.045); }
   .card.atquota { border-color:oklch(0.8 0.16 80 / 0.4); background:oklch(0.8 0.16 80 / 0.045); }
+  .card.yellow { border-color:oklch(0.8 0.16 80 / 0.4); background:oklch(0.8 0.16 80 / 0.045); }
 
   /* Card left accent bar */
   .card::before { content:""; position:absolute; top:0; bottom:0; left:0; width:0.25rem; }
@@ -246,7 +247,7 @@
 
     <div class="grid">
     {{range .Buckets}}
-      <article class="card {{if .ConfirmedOver}}over{{else if .AtQuota}}atquota{{else if .Stale}}stale{{else}}ok{{end}}">
+      <article class="card {{if .ConfirmedOver}}over{{else if ge .BarWidth 80}}yellow{{else if .AtQuota}}atquota{{else if .Stale}}stale{{else}}ok{{end}}">
         <div class="name">{{.Name}}</div>
         {{if .HasQuota}}<div class="meta-line">quota: {{.Quota}}</div>{{end}}
         <div class="used tnum">{{.Used}}</div>
@@ -262,6 +263,7 @@
             <div class="k">Status</div>
             <div>
               {{if .ConfirmedOver}}<span class="pill bad"><span class="dot dot-bad"></span>over quota</span>
+              {{else if ge .BarWidth 80}}<span class="pill warn"><span class="dot dot-warn"></span>80% warning</span>
               {{else if .AtQuota}}<span class="pill warn"><span class="dot dot-warn"></span>at quota</span>
               {{else if .Stale}}<span class="pill warn"><span class="dot dot-warn"></span>stale</span>
               {{else}}<span class="pill ok"><span class="dot dot-up"></span>ok</span>{{end}}
