@@ -222,6 +222,16 @@
       <div class="k">Namespace used</div>
       <div class="v tnum">{{.NamespaceUsed}}</div>
     </div>
+    {{if .NamespaceHasQuota}}
+    <div class="stat">
+      <div class="k">Namespace quota</div>
+      <div class="v tnum">{{.NamespaceQuota}}</div>
+    </div>
+    <div class="stat">
+      <div class="k">Namespace %</div>
+      <div class="v tnum {{if or .NamespaceConfirmedOver .NamespaceAtQuota}}color-bad{{else if ge .NamespaceBarWidth 80}}color-warn{{else}}color-ok{{end}}">{{.NamespacePercent}}</div>
+    </div>
+    {{end}}
     <div class="stat">
       <div class="k">Objects</div>
       <div class="v tnum">{{.NamespaceObjects}}</div>

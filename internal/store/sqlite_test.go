@@ -144,3 +144,53 @@ func TestSQLiteZeroTimesBindAsNull(t *testing.T) {
 		t.Fatalf("zero/absent times must come back nil, got %+v", rows[0])
 	}
 }
+
+func TestSQLiteNamespaceQuotaRoundtrip(t *testing.T) {
+	s := openTestSQLite(t)
+	ctx := context.Background()
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Initially nil.
+	q, err := s.NamespaceQuota(ctx, "ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q != nil {
+		t.Fatalf("expected nil, got %+v", q)
+	}
+
+	// Set.
+	if err := s.SetNamespaceQuota(ctx, "ns", 5000); err != nil {
+		t.Fatal(err)
+	}
+	q, err = s.NamespaceQuota(ctx, "ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q == nil || q.QuotaBytes != 5000 {
+		t.Fatalf("quota = %+v, want 5000", q)
+	}
+
+	// Replace.
+	if err := s.SetNamespaceQuota(ctx, "ns", 9999); err != nil {
+		t.Fatal(err)
+	}
+	q, _ = s.NamespaceQuota(ctx, "ns")
+	if q == nil || q.QuotaBytes != 9999 {
+		t.Fatalf("quota = %+v, want 9999", q)
+	}
+
+	// Delete.
+	if err := s.DeleteNamespaceQuota(ctx, "ns"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteNamespaceQuota(ctx, "ns"); err != nil {
+		t.Fatalf("deleting a missing namespace quota must not error: %v", err)
+	}
+	q, _ = s.NamespaceQuota(ctx, "ns")
+	if q != nil {
+		t.Fatalf("namespace quota after delete = %+v", q)
+	}
+}

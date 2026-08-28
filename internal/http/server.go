@@ -128,6 +128,8 @@ func (s *Server) register(mux *http.ServeMux, prefix string) {
 	mux.HandleFunc("POST "+p+"/api/quotas", s.securityHeaders(s.uiAuth(s.handleAPISetQuotaBody)))
 	mux.HandleFunc("PUT "+p+"/api/quotas/{ns}/{bucket}", s.securityHeaders(s.uiAuth(s.handleAPISetQuotaPath)))
 	mux.HandleFunc("DELETE "+p+"/api/quotas/{ns}/{bucket}", s.securityHeaders(s.uiAuth(s.handleAPIDeleteQuota)))
+	mux.HandleFunc("PUT "+p+"/api/namespace-quotas/{ns}", s.securityHeaders(s.uiAuth(s.handleAPISetNamespaceQuota)))
+	mux.HandleFunc("DELETE "+p+"/api/namespace-quotas/{ns}", s.securityHeaders(s.uiAuth(s.handleAPIDeleteNamespaceQuota)))
 }
 
 // securityHeaders sets the locked header set on every response.
@@ -244,6 +246,11 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleQuotaAll(w http.ResponseWriter, _ *http.Request) {
 	snap := s.deps.Snapshots.Snapshot()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if snap.NamespaceConfirmedOver {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = fmt.Fprintf(w, "namespace over quota (%d consecutive samples)", snap.NamespaceOverStreak)
+		return
+	}
 	for _, b := range snap.Buckets {
 		if b.ConfirmedOver {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -297,27 +304,35 @@ type apiBucket struct {
 }
 
 type apiResponse struct {
-	Namespace          string      `json:"namespace"`
-	PolledAt           time.Time   `json:"polled_at"`
-	PollOK             bool        `json:"poll_ok"`
-	LastError          string      `json:"last_error"`
-	NamespaceUsedBytes int64       `json:"namespace_used_bytes"`
-	NamespaceObjects   int64       `json:"namespace_objects"`
-	StaleAfterSeconds  int64       `json:"stale_after_seconds"`
-	Buckets            []apiBucket `json:"buckets"`
+	Namespace                string      `json:"namespace"`
+	PolledAt                 time.Time   `json:"polled_at"`
+	PollOK                   bool        `json:"poll_ok"`
+	LastError                string      `json:"last_error"`
+	NamespaceUsedBytes       int64       `json:"namespace_used_bytes"`
+	NamespaceObjects         int64       `json:"namespace_objects"`
+	NamespaceQuotaBytes      *int64      `json:"namespace_quota_bytes"`
+	NamespaceUsedPercent     *float64    `json:"namespace_used_percent"`
+	NamespaceAtQuota         bool        `json:"namespace_at_quota"`
+	NamespaceConfirmedOver   bool        `json:"namespace_confirmed_over"`
+	StaleAfterSeconds        int64       `json:"stale_after_seconds"`
+	Buckets                  []apiBucket `json:"buckets"`
 }
 
 func (s *Server) handleAPIBuckets(w http.ResponseWriter, _ *http.Request) {
 	snap := s.deps.Snapshots.Snapshot()
 	resp := apiResponse{
-		Namespace:          snap.Namespace,
-		PolledAt:           snap.PolledAt.UTC(),
-		PollOK:             snap.PollOK,
-		LastError:          snap.LastError,
-		NamespaceUsedBytes: snap.NamespaceBytes,
-		NamespaceObjects:   snap.NamespaceObjects,
-		StaleAfterSeconds:  int64(s.deps.Snapshots.StaleThreshold().Seconds()),
-		Buckets:            make([]apiBucket, 0, len(snap.Buckets)),
+		Namespace:              snap.Namespace,
+		PolledAt:               snap.PolledAt.UTC(),
+		PollOK:                 snap.PollOK,
+		LastError:              snap.LastError,
+		NamespaceUsedBytes:     snap.NamespaceBytes,
+		NamespaceObjects:       snap.NamespaceObjects,
+		NamespaceQuotaBytes:    snap.NamespaceQuotaBytes,
+		NamespaceUsedPercent:   snap.NamespaceUsedPercent,
+		NamespaceAtQuota:       snap.NamespaceAtQuota,
+		NamespaceConfirmedOver: snap.NamespaceConfirmedOver,
+		StaleAfterSeconds:      int64(s.deps.Snapshots.StaleThreshold().Seconds()),
+		Buckets:                make([]apiBucket, 0, len(snap.Buckets)),
 	}
 	for _, b := range snap.Buckets {
 		ab := apiBucket{
@@ -406,6 +421,56 @@ func (s *Server) handleAPIDeleteQuota(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.deps.Store.DeleteQuota(r.Context(), ns, bucket); err != nil {
 		s.deps.Log.Error("delete quota failed", "err", err)
+		writeJSONErr(w, http.StatusInternalServerError, "store error")
+		return
+	}
+	s.refreshQuotas(r)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Namespace quota API ---
+
+type nsQuotaRequest struct {
+	QuotaBytes *int64 `json:"quota_bytes"`
+}
+
+func (s *Server) handleAPISetNamespaceQuota(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("ns")
+	if ns != s.deps.Namespace {
+		writeJSONErr(w, http.StatusBadRequest,
+			fmt.Sprintf("namespace must equal %q in v1", s.deps.Namespace))
+		return
+	}
+	var body nsQuotaRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.QuotaBytes == nil || *body.QuotaBytes <= 0 || *body.QuotaBytes > 1<<62 {
+		writeJSONErr(w, http.StatusBadRequest, "quota_bytes must be a positive integer")
+		return
+	}
+	if err := s.deps.Store.SetNamespaceQuota(r.Context(), ns, *body.QuotaBytes); err != nil {
+		s.deps.Log.Error("set namespace quota failed", "err", err)
+		writeJSONErr(w, http.StatusInternalServerError, "store error")
+		return
+	}
+	s.refreshQuotas(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"namespace":   ns,
+		"quota_bytes": *body.QuotaBytes,
+	})
+}
+
+func (s *Server) handleAPIDeleteNamespaceQuota(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("ns")
+	if ns != s.deps.Namespace {
+		writeJSONErr(w, http.StatusBadRequest,
+			fmt.Sprintf("namespace must equal %q in v1", s.deps.Namespace))
+		return
+	}
+	if err := s.deps.Store.DeleteNamespaceQuota(r.Context(), ns); err != nil {
+		s.deps.Log.Error("delete namespace quota failed", "err", err)
 		writeJSONErr(w, http.StatusInternalServerError, "store error")
 		return
 	}

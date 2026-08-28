@@ -8,30 +8,53 @@ import (
 )
 
 type wallboardData struct {
-	BasePath         string
-	Namespace        string
-	Now              time.Time
-	PolledAt         time.Time
-	PollOK           bool
-	LastError        string
-	NamespaceUsed    string
-	NamespaceObjects int64
-	Buckets          []bucketView
+	BasePath              string
+	Namespace             string
+	Now                   time.Time
+	PolledAt              time.Time
+	PollOK                bool
+	LastError             string
+	NamespaceUsed         string
+	NamespaceUsedBytes    int64
+	NamespaceObjects      int64
+	NamespaceHasQuota     bool
+	NamespaceQuota        string
+	NamespaceQuotaBytes   int64
+	NamespacePercent      string
+	NamespaceBarWidth     int
+	NamespaceAtQuota      bool
+	NamespaceConfirmedOver bool
+	Buckets               []bucketView
 }
 
 func (s *Server) handleWallboard(w http.ResponseWriter, r *http.Request) {
 	snap := s.deps.Snapshots.Snapshot()
 	now := time.Now().UTC()
 	data := wallboardData{
-		BasePath:         strings.TrimRight(s.deps.BasePath, "/"),
-		Namespace:        snap.Namespace,
-		Now:              now,
-		PolledAt:         snap.PolledAt,
-		PollOK:           snap.PollOK,
-		LastError:        snap.LastError,
-		NamespaceUsed:    HumanBytes(snap.NamespaceBytes),
-		NamespaceObjects: snap.NamespaceObjects,
+		BasePath:           strings.TrimRight(s.deps.BasePath, "/"),
+		Namespace:          snap.Namespace,
+		Now:                now,
+		PolledAt:           snap.PolledAt,
+		PollOK:             snap.PollOK,
+		LastError:          snap.LastError,
+		NamespaceUsed:      HumanBytes(snap.NamespaceBytes),
+		NamespaceUsedBytes: snap.NamespaceBytes,
+		NamespaceObjects:   snap.NamespaceObjects,
 	}
+
+	// Namespace-level quota.
+	if snap.NamespaceQuotaBytes != nil {
+		data.NamespaceHasQuota = true
+		data.NamespaceQuotaBytes = *snap.NamespaceQuotaBytes
+		data.NamespaceQuota = HumanBytes(*snap.NamespaceQuotaBytes)
+		data.NamespaceAtQuota = snap.NamespaceAtQuota
+		data.NamespaceConfirmedOver = snap.NamespaceConfirmedOver
+		if snap.NamespaceUsedPercent != nil {
+			data.NamespacePercent = pctStr(*snap.NamespaceUsedPercent)
+			data.NamespaceBarWidth = barWidth(snap.NamespaceUsedPercent)
+		}
+	}
+
 	for _, b := range snap.Buckets {
 		data.Buckets = append(data.Buckets, toBucketView(b))
 	}

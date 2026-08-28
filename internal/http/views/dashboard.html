@@ -193,9 +193,45 @@
 
   <div class="summary">
     <div><div class="k">Namespace used</div><div class="v tnum">{{.NamespaceUsed}}</div></div>
+    {{if .NamespaceHasQuota}}
+    <div><div class="k">Namespace quota</div><div class="v tnum">{{.NamespaceQuota}}</div></div>
+    <div><div class="k">Namespace %</div><div class="v tnum">{{.NamespacePercent}}</div></div>
+    {{end}}
     <div><div class="k">Objects</div><div class="v tnum">{{.NamespaceObjects}}</div></div>
     <div><div class="k">Last poll</div><div class="v" style="font-size:0.9375rem">{{if .PolledAt.IsZero}}—{{else}}{{.PolledAt.UTC.Format "2006-01-02 15:04 UTC"}} ({{age .PolledAt .Now}} ago){{end}}</div></div>
   </div>
+
+  <!-- Namespace quota bar -->
+  {{if .NamespaceHasQuota}}
+  <div style="display:flex;align-items:center;gap:0.75rem;margin:0.75rem 0;">
+    <div class="bar" style="width:240px;{{if or .NamespaceConfirmedOver .NamespaceAtQuota}}background:oklch(0.64 0.21 25 / 0.15);{{else if ge .NamespaceBarWidth 80}}background:oklch(0.8 0.16 80 / 0.12);{{end}}">
+      <span style="width:{{.NamespaceBarWidth}}%;{{if or .NamespaceConfirmedOver .NamespaceAtQuota}}background:var(--danger);{{else if ge .NamespaceBarWidth 80}}background:var(--warning);{{end}}"></span>
+    </div>
+    <span style="font-size:0.8125rem;color:var(--muted-fg);">{{.NamespaceUsed}} / {{.NamespaceQuota}}</span>
+    {{if .NamespaceConfirmedOver}}<span class="badge over"><span class="dot dot-bad"></span> namespace over quota</span>
+    {{else if .NamespaceAtQuota}}<span class="badge atquota"><span class="dot dot-warn"></span> namespace at quota</span>
+    {{else if ge .NamespaceBarWidth 80}}<span class="badge stale"><span class="dot dot-warn"></span> namespace 80% warning</span>{{end}}
+    <form class="inline" method="post" action="{{.BasePath}}/">
+      <input type="hidden" name="scope" value="namespace">
+      <input type="hidden" name="action" value="delete">
+      <button type="submit" class="ghost" title="Remove namespace quota">✕</button>
+    </form>
+  </div>
+  {{else}}
+  <div style="margin:0.75rem 0;">
+    <form class="inline" method="post" action="{{.BasePath}}/">
+      <input type="hidden" name="scope" value="namespace">
+      <span style="font-size:0.8125rem;color:var(--muted-fg);margin-right:0.25rem;">Set namespace quota:</span>
+      <input type="number" name="quota" min="0" step="any" placeholder="quota" required>
+      <select name="unit">
+        <option value="GiB" selected>GiB</option>
+        <option value="MiB">MiB</option>
+        <option value="TiB">TiB</option>
+      </select>
+      <button type="submit">Set</button>
+    </form>
+  </div>
+  {{end}}
 
   <div class="table-wrap">
   <table>

@@ -38,13 +38,18 @@ type BucketState struct {
 
 // Snapshot is the poller's last observation.
 type Snapshot struct {
-	Namespace        string
-	PolledAt         time.Time
-	PollOK           bool
-	LastError        string
-	NamespaceBytes   int64
-	NamespaceObjects int64
-	Buckets          []BucketState
+	Namespace            string
+	PolledAt             time.Time
+	PollOK               bool
+	LastError            string
+	NamespaceBytes       int64
+	NamespaceObjects     int64
+	NamespaceQuotaBytes  *int64   // nil when no namespace quota is set
+	NamespaceUsedPercent *float64
+	NamespaceAtQuota     bool
+	NamespaceOverStreak  int
+	NamespaceConfirmedOver bool
+	Buckets              []BucketState
 }
 
 // Poller polls ECS billing on an interval and maintains hysteresis state.
@@ -155,6 +160,11 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		quotas = map[string]store.QuotaRow{}
 	}
 
+	nsQuota, nsqErr := p.store.NamespaceQuota(ctx, p.namespace)
+	if nsqErr != nil {
+		p.log.Warn("poller: namespace quota lookup failed", "err", nsqErr)
+	}
+
 	prev := p.previousStreaks()
 	th := p.StaleThreshold()
 
@@ -207,15 +217,35 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		p.log.Error("poller: persist state failed", "err", err)
 	}
 
+	// Namespace-level quota hysteresis.
+	var nsQuotaBytes *int64
+	var nsPct *float64
+	var nsAtQuota bool
+	var nsStreak int
+	var nsConfirmed bool
+	if nsQuota != nil {
+		v := nsQuota.QuotaBytes
+		nsQuotaBytes = &v
+		nsStreak, nsConfirmed = quota.Apply(p.prevNamespaceStreak(), nsQuotaBytes, payload.NamespaceBytes)
+		nsAtQuota = payload.NamespaceBytes >= *nsQuotaBytes
+		pct := float64(payload.NamespaceBytes) / float64(*nsQuotaBytes) * 100
+		nsPct = &pct
+	}
+
 	p.mu.Lock()
 	p.snap = Snapshot{
-		Namespace:        p.namespace,
-		PolledAt:         now,
-		PollOK:           true,
-		LastError:        "",
-		NamespaceBytes:   payload.NamespaceBytes,
-		NamespaceObjects: payload.NamespaceObjects,
-		Buckets:          buckets,
+		Namespace:              p.namespace,
+		PolledAt:               now,
+		PollOK:                 true,
+		LastError:              "",
+		NamespaceBytes:         payload.NamespaceBytes,
+		NamespaceObjects:       payload.NamespaceObjects,
+		NamespaceQuotaBytes:    nsQuotaBytes,
+		NamespaceUsedPercent:   nsPct,
+		NamespaceAtQuota:       nsAtQuota,
+		NamespaceOverStreak:    nsStreak,
+		NamespaceConfirmedOver: nsConfirmed,
+		Buckets:                buckets,
 	}
 	p.mu.Unlock()
 	p.log.Info("poller: billing poll ok", "buckets", len(buckets), "namespace_bytes", payload.NamespaceBytes)
@@ -229,6 +259,12 @@ func (p *Poller) previousStreaks() map[string]int {
 		out[b.Name] = b.OverStreak
 	}
 	return out
+}
+
+func (p *Poller) prevNamespaceStreak() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.snap.NamespaceOverStreak
 }
 
 // Snapshot returns a copy of the current snapshot.
@@ -249,6 +285,10 @@ func (p *Poller) RefreshQuotas(ctx context.Context) {
 	if err != nil {
 		p.log.Warn("poller: refresh quotas lookup failed", "err", err)
 		return
+	}
+	nsQuota, nsqErr := p.store.NamespaceQuota(ctx, p.namespace)
+	if nsqErr != nil {
+		p.log.Warn("poller: refresh namespace quota lookup failed", "err", nsqErr)
 	}
 
 	p.mu.Lock()
@@ -276,6 +316,23 @@ func (p *Poller) RefreshQuotas(ctx context.Context) {
 			pct := float64(b.UsedBytes) / float64(*qp) * 100
 			p.snap.Buckets[i].UsedPercent = &pct
 		}
+	}
+
+	// Namespace-level quota refresh.
+	if nsQuota != nil {
+		v := nsQuota.QuotaBytes
+		p.snap.NamespaceQuotaBytes = &v
+		p.snap.NamespaceOverStreak, p.snap.NamespaceConfirmedOver = quota.Apply(
+			p.snap.NamespaceOverStreak, &v, p.snap.NamespaceBytes)
+		p.snap.NamespaceAtQuota = p.snap.NamespaceBytes >= v
+		pct := float64(p.snap.NamespaceBytes) / float64(v) * 100
+		p.snap.NamespaceUsedPercent = &pct
+	} else {
+		p.snap.NamespaceQuotaBytes = nil
+		p.snap.NamespaceUsedPercent = nil
+		p.snap.NamespaceAtQuota = false
+		p.snap.NamespaceOverStreak = 0
+		p.snap.NamespaceConfirmedOver = false
 	}
 }
 

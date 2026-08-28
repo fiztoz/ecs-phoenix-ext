@@ -32,16 +32,24 @@ type bucketView struct {
 }
 
 type dashboardData struct {
-	BasePath         string
-	Namespace        string
-	Now              time.Time
-	PolledAt         time.Time
-	PollOK           bool
-	LastError        string
-	NamespaceUsed    string
-	NamespaceObjects int64
-	Buckets          []bucketView
-	Flash            string
+	BasePath              string
+	Namespace             string
+	Now                   time.Time
+	PolledAt              time.Time
+	PollOK                bool
+	LastError             string
+	NamespaceUsed         string
+	NamespaceUsedBytes    int64
+	NamespaceObjects      int64
+	NamespaceHasQuota     bool
+	NamespaceQuota        string
+	NamespaceQuotaBytes   int64
+	NamespacePercent      string
+	NamespaceBarWidth     int
+	NamespaceAtQuota      bool
+	NamespaceConfirmedOver bool
+	Buckets               []bucketView
+	Flash                 string
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -56,15 +64,29 @@ func (s *Server) buildDashboard(r *http.Request) dashboardData {
 	snap := s.deps.Snapshots.Snapshot()
 	now := time.Now().UTC()
 	data := dashboardData{
-		BasePath:         strings.TrimRight(s.deps.BasePath, "/"),
-		Namespace:        snap.Namespace,
-		Now:              now,
-		PolledAt:         snap.PolledAt,
-		PollOK:           snap.PollOK,
-		LastError:        snap.LastError,
-		NamespaceUsed:    HumanBytes(snap.NamespaceBytes),
-		NamespaceObjects: snap.NamespaceObjects,
-		Flash:            r.URL.Query().Get("msg"),
+		BasePath:           strings.TrimRight(s.deps.BasePath, "/"),
+		Namespace:          snap.Namespace,
+		Now:                now,
+		PolledAt:           snap.PolledAt,
+		PollOK:             snap.PollOK,
+		LastError:          snap.LastError,
+		NamespaceUsed:      HumanBytes(snap.NamespaceBytes),
+		NamespaceUsedBytes: snap.NamespaceBytes,
+		NamespaceObjects:   snap.NamespaceObjects,
+		Flash:              r.URL.Query().Get("msg"),
+	}
+
+	// Namespace-level quota.
+	if snap.NamespaceQuotaBytes != nil {
+		data.NamespaceHasQuota = true
+		data.NamespaceQuotaBytes = *snap.NamespaceQuotaBytes
+		data.NamespaceQuota = HumanBytes(*snap.NamespaceQuotaBytes)
+		data.NamespaceAtQuota = snap.NamespaceAtQuota
+		data.NamespaceConfirmedOver = snap.NamespaceConfirmedOver
+		if snap.NamespaceUsedPercent != nil {
+			data.NamespacePercent = pctStr(*snap.NamespaceUsedPercent)
+			data.NamespaceBarWidth = barWidth(snap.NamespaceUsedPercent)
+		}
 	}
 
 	seen := make(map[string]bool, len(snap.Buckets))
@@ -163,6 +185,43 @@ func (s *Server) handleQuotaForm(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, base+"/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
 	}
 
+	// Namespace-level quota form.
+	if r.Form.Get("scope") == "namespace" {
+		if r.Form.Get("action") == "delete" {
+			if err := s.deps.Store.DeleteNamespaceQuota(r.Context(), s.deps.Namespace); err != nil {
+				s.deps.Log.Error("form delete namespace quota", "err", err)
+				redirect("error: could not delete namespace quota")
+				return
+			}
+			s.refreshQuotas(r)
+			redirect("namespace quota removed")
+			return
+		}
+		q, err := strconv.ParseFloat(r.Form.Get("quota"), 64)
+		if err != nil || q <= 0 {
+			redirect("error: quota must be a positive number")
+			return
+		}
+		unit := r.Form.Get("unit")
+		if unit == "" {
+			unit = "GiB"
+		}
+		bytes, err := ecs.ToBytes(q, unit)
+		if err != nil {
+			redirect("error: " + err.Error())
+			return
+		}
+		if err := s.deps.Store.SetNamespaceQuota(r.Context(), s.deps.Namespace, bytes); err != nil {
+			s.deps.Log.Error("form set namespace quota", "err", err)
+			redirect("error: could not save namespace quota")
+			return
+		}
+		s.refreshQuotas(r)
+		redirect("namespace quota set: " + HumanBytes(bytes))
+		return
+	}
+
+	// Bucket-level quota form.
 	bucket := r.Form.Get("bucket")
 	if err := validateBucket(bucket); err != nil {
 		redirect("error: " + err.Error())

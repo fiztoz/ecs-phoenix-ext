@@ -114,6 +114,32 @@ func (m *MariaDB) Quotas(ctx context.Context, namespace string) (map[string]Quot
 	return queryQuotas(ctx, m.db, namespace)
 }
 
+func (m *MariaDB) SetNamespaceQuota(ctx context.Context, namespace string, quotaBytes int64) error {
+	_, err := m.db.ExecContext(ctx, `
+INSERT INTO ext_ecs_usage_namespace_quotas (namespace, quota_bytes, updated_at)
+VALUES (?, ?, ?)
+ON DUPLICATE KEY UPDATE quota_bytes = VALUES(quota_bytes), updated_at = VALUES(updated_at)`,
+		namespace, quotaBytes, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("store: set namespace quota %s: %w", namespace, err)
+	}
+	return nil
+}
+
+func (m *MariaDB) DeleteNamespaceQuota(ctx context.Context, namespace string) error {
+	_, err := m.db.ExecContext(ctx,
+		`DELETE FROM ext_ecs_usage_namespace_quotas WHERE namespace = ?`,
+		namespace)
+	if err != nil {
+		return fmt.Errorf("store: delete namespace quota %s: %w", namespace, err)
+	}
+	return nil
+}
+
+func (m *MariaDB) NamespaceQuota(ctx context.Context, namespace string) (*NamespaceQuotaRow, error) {
+	return queryNamespaceQuota(ctx, m.db, namespace)
+}
+
 func (m *MariaDB) Close() error { return m.db.Close() }
 
 // --- shared query helpers ---
@@ -170,6 +196,24 @@ func queryQuotas(ctx context.Context, db *sql.DB, namespace string) (map[string]
 		out[q.Bucket] = q
 	}
 	return out, rows.Err()
+}
+
+func queryNamespaceQuota(ctx context.Context, db *sql.DB, namespace string) (*NamespaceQuotaRow, error) {
+	row := db.QueryRowContext(ctx,
+		`SELECT namespace, quota_bytes, updated_at FROM ext_ecs_usage_namespace_quotas WHERE namespace = ?`,
+		namespace)
+	var q NamespaceQuotaRow
+	var updated any
+	if err := row.Scan(&q.Namespace, &q.QuotaBytes, &updated); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: scan namespace quota: %w", err)
+	}
+	if ut, err := scanTime(updated); err == nil && ut != nil {
+		q.UpdatedAt = *ut
+	}
+	return &q, nil
 }
 
 func nullString(s string) any {

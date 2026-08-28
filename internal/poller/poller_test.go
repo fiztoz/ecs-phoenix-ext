@@ -287,3 +287,82 @@ func TestTimestampsAreUTC(t *testing.T) {
 		t.Fatalf("persisted timestamps must be UTC")
 	}
 }
+
+func TestNamespaceQuotaHysteresis(t *testing.T) {
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	mem := store.NewMem()
+	if err := mem.SetNamespaceQuota(context.Background(), "prod-ns", 500); err != nil {
+		t.Fatal(err)
+	}
+	src := &fakeSource{results: []pollResult{
+		{payload: payload(600, 0, now)}, // over, sample 1
+		{payload: payload(600, 0, now)}, // over, sample 2 → confirmed
+		{payload: payload(200, 0, now)}, // under → reset
+	}}
+	p := newTestPoller(t, src, mem, now)
+
+	p.PollOnce(context.Background())
+	snap := p.Snapshot()
+	if snap.NamespaceQuotaBytes == nil || *snap.NamespaceQuotaBytes != 500 {
+		t.Fatalf("namespace quota not set: %+v", snap)
+	}
+	if snap.NamespaceOverStreak != 1 || snap.NamespaceConfirmedOver {
+		t.Fatalf("one over sample must not confirm: %+v", snap)
+	}
+	if !snap.NamespaceAtQuota {
+		t.Fatal("namespace at quota must be true")
+	}
+
+	p.PollOnce(context.Background())
+	snap = p.Snapshot()
+	if snap.NamespaceOverStreak != 2 || !snap.NamespaceConfirmedOver {
+		t.Fatalf("two over samples must confirm: %+v", snap)
+	}
+
+	p.PollOnce(context.Background())
+	snap = p.Snapshot()
+	if snap.NamespaceOverStreak != 0 || snap.NamespaceConfirmedOver {
+		t.Fatalf("under-quota sample must reset streak: %+v", snap)
+	}
+}
+
+func TestNamespaceQuotaRefresh(t *testing.T) {
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	mem := store.NewMem()
+	src := &fakeSource{results: []pollResult{
+		{payload: payload(100, 0, now)},
+	}}
+	p := newTestPoller(t, src, mem, now)
+	p.PollOnce(context.Background())
+
+	// No namespace quota initially.
+	if snap := p.Snapshot(); snap.NamespaceQuotaBytes != nil {
+		t.Fatalf("expected no namespace quota: %+v", snap)
+	}
+
+	// Set namespace quota below used: visible immediately.
+	if err := mem.SetNamespaceQuota(context.Background(), "prod-ns", 50); err != nil {
+		t.Fatal(err)
+	}
+	p.RefreshQuotas(context.Background())
+	snap := p.Snapshot()
+	if snap.NamespaceQuotaBytes == nil || *snap.NamespaceQuotaBytes != 50 {
+		t.Fatalf("namespace quota not visible after refresh: %+v", snap)
+	}
+	if snap.NamespaceUsedPercent == nil || *snap.NamespaceUsedPercent != 200 {
+		t.Fatalf("namespace percent = %v, want 200%%", snap.NamespaceUsedPercent)
+	}
+	if snap.NamespaceOverStreak != 1 {
+		t.Fatalf("namespace over streak = %d, want 1", snap.NamespaceOverStreak)
+	}
+
+	// Delete namespace quota: clears immediately.
+	if err := mem.DeleteNamespaceQuota(context.Background(), "prod-ns"); err != nil {
+		t.Fatal(err)
+	}
+	p.RefreshQuotas(context.Background())
+	snap = p.Snapshot()
+	if snap.NamespaceQuotaBytes != nil || snap.NamespaceUsedPercent != nil || snap.NamespaceConfirmedOver {
+		t.Fatalf("namespace quota delete not reflected: %+v", snap)
+	}
+}
