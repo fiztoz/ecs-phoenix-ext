@@ -231,6 +231,11 @@
       <div class="k">Namespace %</div>
       <div class="v tnum {{if or .NamespaceConfirmedOver .NamespaceAtQuota}}color-bad{{else if ge .NamespaceBarWidth 80}}color-warn{{else}}color-ok{{end}}">{{.NamespacePercent}}</div>
     </div>
+    {{else}}
+    <div class="stat">
+      <div class="k">Namespace quota</div>
+      <div class="v tnum">Unlimited</div>
+    </div>
     {{end}}
     {{if .HasDefaultBlock}}
     <div class="stat">

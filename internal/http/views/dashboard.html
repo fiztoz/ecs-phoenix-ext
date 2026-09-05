@@ -195,6 +195,8 @@
     {{if .NamespaceHasQuota}}
     <div><div class="k">Namespace quota</div><div class="v tnum">{{.NamespaceQuota}}</div></div>
     <div><div class="k">Namespace %</div><div class="v tnum">{{.NamespacePercent}}</div></div>
+    {{else}}
+    <div><div class="k">Namespace quota</div><div class="v tnum">Unlimited</div></div>
     {{end}}
     {{if .HasDefaultBlock}}
     <div><div class="k">Default block</div><div class="v tnum">{{.NamespaceDefaultBlock}}</div></div>
@@ -212,7 +214,7 @@
   <div class="sub" style="margin:-0.25rem 0 0.75rem;">Bucket info unavailable: {{.InventoryError}} — usage above is still live billing data.</div>
   {{end}}
 
-  <!-- Namespace quota bar -->
+  <!-- Namespace quota bar (ECS-native block threshold) -->
   {{if .NamespaceHasQuota}}
   <div style="display:flex;align-items:center;gap:0.75rem;margin:0.75rem 0;">
     <div class="bar" style="width:240px;{{if or .NamespaceConfirmedOver .NamespaceAtQuota}}background:oklch(0.64 0.21 25 / 0.15);{{else if ge .NamespaceBarWidth 80}}background:oklch(0.8 0.16 80 / 0.12);{{end}}">
@@ -222,25 +224,6 @@
     {{if .NamespaceConfirmedOver}}<span class="badge over"><span class="dot dot-bad"></span> namespace over quota</span>
     {{else if .NamespaceAtQuota}}<span class="badge atquota"><span class="dot dot-warn"></span> namespace at quota</span>
     {{else if ge .NamespaceBarWidth 80}}<span class="badge stale"><span class="dot dot-warn"></span> namespace 80% warning</span>{{end}}
-    <form class="inline" method="post" action="{{.BasePath}}/">
-      <input type="hidden" name="scope" value="namespace">
-      <input type="hidden" name="action" value="delete">
-      <button type="submit" class="ghost" title="Remove namespace quota">✕</button>
-    </form>
-  </div>
-  {{else}}
-  <div style="margin:0.75rem 0;">
-    <form class="inline" method="post" action="{{.BasePath}}/">
-      <input type="hidden" name="scope" value="namespace">
-      <span style="font-size:0.8125rem;color:var(--muted-fg);margin-right:0.25rem;">Set namespace quota:</span>
-      <input type="number" name="quota" min="0" step="any" placeholder="quota" required>
-      <select name="unit">
-        <option value="GiB" selected>GiB</option>
-        <option value="MiB">MiB</option>
-        <option value="TiB">TiB</option>
-      </select>
-      <button type="submit">Set</button>
-    </form>
   </div>
   {{end}}
 
@@ -300,9 +283,9 @@
     good sample is older than the freshness window.
     Used already includes incomplete multipart uploads. Quota / Block / Notify
     are the ECS-native thresholds (Block Access at / Send Notification at);
-    quota-off buckets show Unlimited. Default block is the namespace
-    default_bucket_block_size new buckets inherit. Only the namespace total
-    quota is operator-set here — bucket limits live in the ECS UI.
+    quota-off buckets and namespaces show Unlimited. Default block is the
+    namespace default_bucket_block_size new buckets inherit. No quotas are
+    operator-set here — bucket and namespace limits live in the ECS UI.
   </footer>
 </div>
 

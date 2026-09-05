@@ -176,11 +176,6 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		return
 	}
 
-	nsQuota, nsqErr := p.store.NamespaceQuota(ctx, p.namespace)
-	if nsqErr != nil {
-		p.log.Warn("poller: namespace quota lookup failed", "err", nsqErr)
-	}
-
 	prev := p.previousStreaks()
 	th := p.StaleThreshold()
 
@@ -256,15 +251,46 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		p.log.Error("poller: persist state failed", "err", err)
 	}
 
-	// Namespace-level quota hysteresis.
+	// Namespace quota is ECS-native now, like buckets: the namespace-level
+	// blockSize threshold (GiB, normalized to bytes by the parser) is the
+	// limit, with the same 2-sample hysteresis before /health/quota trips.
+	// On a failed inventory poll, fall back to the prior poll's values so a
+	// limiter does not blink off on one bad enrich.
+	var nsDefault, nsBlock, nsNotify *int64
+	if nsmeta != nil {
+		if nsmeta.HasDefaultBucketBlock {
+			v := nsmeta.DefaultBucketBlock
+			nsDefault = &v
+		}
+		if nsmeta.HasBlock {
+			v := nsmeta.BlockSize
+			nsBlock = &v
+		}
+		if nsmeta.HasNotify {
+			v := nsmeta.NotificationSize
+			nsNotify = &v
+		}
+	}
+	if !invOK {
+		pd, pb, pn := p.previousNamespaceMeta()
+		if nsDefault == nil {
+			nsDefault = pd
+		}
+		if nsBlock == nil {
+			nsBlock = pb
+		}
+		if nsNotify == nil {
+			nsNotify = pn
+		}
+	}
+
 	var nsQuotaBytes *int64
 	var nsPct *float64
 	var nsAtQuota bool
 	var nsStreak int
 	var nsConfirmed bool
-	if nsQuota != nil {
-		v := nsQuota.QuotaBytes
-		nsQuotaBytes = &v
+	if nsBlock != nil {
+		nsQuotaBytes = nsBlock
 		nsStreak, nsConfirmed = quota.Apply(p.prevNamespaceStreak(), nsQuotaBytes, payload.NamespaceBytes)
 		nsAtQuota = payload.NamespaceBytes >= *nsQuotaBytes
 		pct := float64(payload.NamespaceBytes) / float64(*nsQuotaBytes) * 100
@@ -272,23 +298,6 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	}
 
 	p.mu.Lock()
-	prevNSBlock := p.snap.NamespaceDefaultBlock
-	prevNSBSize := p.snap.NamespaceBlockSize
-	prevNSNotify := p.snap.NamespaceNotificationSize
-	if nsmeta != nil {
-		if nsmeta.HasDefaultBucketBlock {
-			v := nsmeta.DefaultBucketBlock
-			prevNSBlock = &v
-		}
-		if nsmeta.HasBlock {
-			v := nsmeta.BlockSize
-			prevNSBSize = &v
-		}
-		if nsmeta.HasNotify {
-			v := nsmeta.NotificationSize
-			prevNSNotify = &v
-		}
-	}
 	p.snap = Snapshot{
 		Namespace:                 p.namespace,
 		PolledAt:                  now,
@@ -301,9 +310,9 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		NamespaceAtQuota:          nsAtQuota,
 		NamespaceOverStreak:       nsStreak,
 		NamespaceConfirmedOver:    nsConfirmed,
-		NamespaceDefaultBlock:     prevNSBlock,
-		NamespaceBlockSize:        prevNSBSize,
-		NamespaceNotificationSize: prevNSNotify,
+		NamespaceDefaultBlock:     nsDefault,
+		NamespaceBlockSize:        nsBlock,
+		NamespaceNotificationSize: nsNotify,
 		InventoryOK:               invOK,
 		InventoryError:            invErr,
 		Buckets:                   buckets,
@@ -366,6 +375,27 @@ func (p *Poller) previousInventory() map[string]ecs.BucketMeta {
 	return out
 }
 
+// previousNamespaceMeta returns the prior poll's namespace-level
+// default/block/notify values (value-copied) for carry-over when a fresh
+// inventory poll fails, so a limiter does not blink off on one bad enrich.
+func (p *Poller) previousNamespaceMeta() (defaultBlock, block, notify *int64) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if v := p.snap.NamespaceDefaultBlock; v != nil {
+		c := *v
+		defaultBlock = &c
+	}
+	if v := p.snap.NamespaceBlockSize; v != nil {
+		c := *v
+		block = &c
+	}
+	if v := p.snap.NamespaceNotificationSize; v != nil {
+		c := *v
+		notify = &c
+	}
+	return defaultBlock, block, notify
+}
+
 func (p *Poller) previousStreaks() map[string]int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -390,42 +420,6 @@ func (p *Poller) Snapshot() Snapshot {
 	cp.Buckets = make([]BucketState, len(p.snap.Buckets))
 	copy(cp.Buckets, p.snap.Buckets)
 	return cp
-}
-
-// RefreshQuotas re-reads the operator-set namespace total quota from the
-// store and recomputes the namespace percent and hysteresis fields without
-// waiting for the next poll, so a namespace quota set/delete is visible
-// immediately. Bucket quotas are ECS-native (they arrive with each poll),
-// so buckets are untouched here.
-func (p *Poller) RefreshQuotas(ctx context.Context) {
-	nsQuota, nsqErr := p.store.NamespaceQuota(ctx, p.namespace)
-	if nsqErr != nil {
-		p.log.Warn("poller: refresh namespace quota lookup failed", "err", nsqErr)
-		return
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.snap.PollOK {
-		return // nothing polled yet; next poll will apply quotas
-	}
-
-	// Namespace-level quota refresh.
-	if nsQuota != nil {
-		v := nsQuota.QuotaBytes
-		p.snap.NamespaceQuotaBytes = &v
-		p.snap.NamespaceOverStreak, p.snap.NamespaceConfirmedOver = quota.Apply(
-			p.snap.NamespaceOverStreak, &v, p.snap.NamespaceBytes)
-		p.snap.NamespaceAtQuota = p.snap.NamespaceBytes >= v
-		pct := float64(p.snap.NamespaceBytes) / float64(v) * 100
-		p.snap.NamespaceUsedPercent = &pct
-	} else {
-		p.snap.NamespaceQuotaBytes = nil
-		p.snap.NamespaceUsedPercent = nil
-		p.snap.NamespaceAtQuota = false
-		p.snap.NamespaceOverStreak = 0
-		p.snap.NamespaceConfirmedOver = false
-	}
 }
 
 // PollOnce runs a single poll synchronously (used by tests and startup).

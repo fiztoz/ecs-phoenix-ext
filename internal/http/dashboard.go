@@ -2,7 +2,6 @@ package http
 
 import (
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -201,61 +200,7 @@ func pctStr(p float64) string {
 	return strconv.FormatFloat(p, 'f', 1, 64) + "%"
 }
 
-// handleQuotaForm implements the HTML quota forms (PRG): set or delete a
-// quota, then redirect back to the dashboard.
-func (s *Server) handleQuotaForm(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	base := strings.TrimRight(s.deps.BasePath, "/")
-	redirect := func(msg string) {
-		http.Redirect(w, r, base+"/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
-	}
-
-	// Namespace-level quota form.
-	if r.Form.Get("scope") == "namespace" {
-		if r.Form.Get("action") == "delete" {
-			if err := s.deps.Store.DeleteNamespaceQuota(r.Context(), s.deps.Namespace); err != nil {
-				s.deps.Log.Error("form delete namespace quota", "err", err)
-				redirect("error: could not delete namespace quota")
-				return
-			}
-			s.refreshQuotas(r)
-			redirect("namespace quota removed")
-			return
-		}
-		q, err := strconv.ParseFloat(r.Form.Get("quota"), 64)
-		if err != nil || q <= 0 {
-			redirect("error: quota must be a positive number")
-			return
-		}
-		unit := r.Form.Get("unit")
-		if unit == "" {
-			unit = "GiB"
-		}
-		bytes, err := ecs.ToBytes(q, unit)
-		if err != nil {
-			redirect("error: " + err.Error())
-			return
-		}
-		if err := s.deps.Store.SetNamespaceQuota(r.Context(), s.deps.Namespace, bytes); err != nil {
-			s.deps.Log.Error("form set namespace quota", "err", err)
-			redirect("error: could not save namespace quota")
-			return
-		}
-		s.refreshQuotas(r)
-		redirect("namespace quota set: " + HumanBytes(bytes))
-		return
-	}
-
-	// Bucket quotas are ECS-native (Block Access thresholds from the bucket
-	// inventory poll) and cannot be set here. Anything that is not the
-	// namespace form is rejected.
-	redirect("error: bucket quotas come from ECS; set them in the ECS UI")
-}
-
-// HumanBytes renders bytes// HumanBytes renders bytes with binary units (GiB, never "GB").
+// HumanBytes renders bytes with binary units (GiB, never "GB").
 func HumanBytes(n int64) string {
 	const unit = 1024
 	if n < unit {

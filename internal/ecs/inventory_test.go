@@ -26,15 +26,16 @@ func TestParseBucketListFixture(t *testing.T) {
 	if m0.Name != "sample-bkt" || !m0.HasBlock || !m0.HasNotify {
 		t.Fatalf("m0 = %+v, want block+notify present", m0)
 	}
-	if m0.BlockSize != 134217728 {
-		t.Errorf("block = %d, want 134217728", m0.BlockSize)
+	// ECS reports GiB; the parser normalizes to bytes.
+	if m0.BlockSize != 128*1024*1024*1024 {
+		t.Errorf("block = %d, want 128 GiB in bytes", m0.BlockSize)
 	}
-	if m0.NotificationSize != 1073741824 {
-		t.Errorf("notify = %d, want 1073741824", m0.NotificationSize)
+	if m0.NotificationSize != 1024*1024*1024*1024 {
+		t.Errorf("notify = %d, want 1024 GiB in bytes", m0.NotificationSize)
 	}
 	// String-encoded numbers must parse too.
-	if metas[1].BlockSize != 67108864 {
-		t.Errorf("string block = %d, want 67108864", metas[1].BlockSize)
+	if metas[1].BlockSize != 64*1024*1024*1024 {
+		t.Errorf("string block = %d, want 64 GiB in bytes", metas[1].BlockSize)
 	}
 }
 
@@ -48,21 +49,21 @@ func TestParseNamespaceMetaFixture(t *testing.T) {
 		t.Errorf("name = %q", m.Name)
 	}
 	if !m.HasDefaultBucketBlock || m.DefaultBucketBlock != 134217728 {
-		t.Errorf("default block = %d/%v, want 134217728/true", m.DefaultBucketBlock, m.HasDefaultBucketBlock)
+		t.Errorf("default block = %d/%v, want 134217728/true (raw bytes chunk size)", m.DefaultBucketBlock, m.HasDefaultBucketBlock)
 	}
 }
 
 func TestParseBucketListXML(t *testing.T) {
 	body := `<?xml version="1.0"?><bucket_list>` +
 		`<object_bucket><name>b1</name><namespace>ns</namespace>` +
-		`<block_size>134217728</block_size><notification_size>1024</notification_size></object_bucket>` +
+		`<block_size>128</block_size><notification_size>1024</notification_size></object_bucket>` +
 		`<next_marker></next_marker></bucket_list>`
 	metas, _, err := ParseBucketList([]byte(body), "application/xml")
 	if err != nil {
 		t.Fatalf("XML: %v", err)
 	}
-	if len(metas) != 1 || metas[0].BlockSize != 134217728 {
-		t.Fatalf("XML metas = %+v", metas)
+	if len(metas) != 1 || metas[0].BlockSize != 128*1024*1024*1024 {
+		t.Fatalf("XML metas = %+v, want 128 GiB in bytes", metas)
 	}
 }
 
@@ -130,9 +131,9 @@ func TestNamespaceMetaInfoRoundTrip(t *testing.T) {
 func TestQuotaModeVariations(t *testing.T) {
 	body := `{"object_bucket": [
 	  {"name": "off-bkt", "namespace": "ns", "block_size": 0, "notification_size": 0},
-	  {"name": "notify-bkt", "namespace": "ns", "notification_size": 1073741824},
-	  {"name": "block-bkt", "namespace": "ns", "block_size": 10737418240},
-	  {"name": "both-bkt", "namespace": "ns", "block_size": 10737418240, "notification_size": 8589934592}
+	  {"name": "notify-bkt", "namespace": "ns", "notification_size": 1024},
+	  {"name": "block-bkt", "namespace": "ns", "block_size": 10},
+	  {"name": "both-bkt", "namespace": "ns", "block_size": 10, "notification_size": 8}
 	], "next_marker": ""}`
 	metas, _, err := ParseBucketList([]byte(body), "application/json")
 	if err != nil {
@@ -155,8 +156,11 @@ func TestQuotaModeVariations(t *testing.T) {
 	if m := byName["both-bkt"]; m.QuotaMode() != "block-notify" || !m.HasBlock || !m.HasNotify {
 		t.Errorf("both-bkt = %+v, want block-notify", m)
 	}
-	if got := byName["both-bkt"].BlockSize; got != 10737418240 {
-		t.Errorf("both block = %d, want 10737418240 (10 GiB UI value in bytes)", got)
+	if got := byName["both-bkt"].BlockSize; got != 10*1024*1024*1024 {
+		t.Errorf("both block = %d, want 10 GiB in bytes", got)
+	}
+	if got := byName["notify-bkt"].NotificationSize; got != 1024*1024*1024*1024 {
+		t.Errorf("notify size = %d, want 1024 GiB in bytes", got)
 	}
 }
 
@@ -267,15 +271,15 @@ func TestRealNamespaceXMLShape(t *testing.T) {
 	// Positive camelCase namespace thresholds are captured.
 	body2 := `<namespace><name>ns1</name><id>ns1</id>` +
 		`<default_bucket_block_size>-1</default_bucket_block_size>` +
-		`<blockSize>10737418240</blockSize><notificationSize>8589934592</notificationSize></namespace>`
+		`<blockSize>10</blockSize><notificationSize>8</notificationSize></namespace>`
 	m2, err := ParseNamespaceMeta([]byte(body2), "application/xml")
 	if err != nil {
 		t.Fatalf("ParseNamespaceMeta: %v", err)
 	}
-	if !m2.HasBlock || m2.BlockSize != 10737418240 {
+	if !m2.HasBlock || m2.BlockSize != 10*1024*1024*1024 {
 		t.Errorf("namespace block not captured: %+v", m2)
 	}
-	if !m2.HasNotify || m2.NotificationSize != 8589934592 {
+	if !m2.HasNotify || m2.NotificationSize != 8*1024*1024*1024 {
 		t.Errorf("namespace notify not captured: %+v", m2)
 	}
 	if m2.HasDefaultBucketBlock {

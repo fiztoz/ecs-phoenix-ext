@@ -3,14 +3,12 @@ package store
 import (
 	"context"
 	"sync"
-	"time"
 )
 
 // Mem is an in-memory Store used by tests. Not for production use.
 type Mem struct {
-	mu      sync.Mutex
-	states  map[string]StateRow
-	nsQuota *NamespaceQuotaRow
+	mu     sync.Mutex
+	states map[string]StateRow
 }
 
 // NewMem builds an empty in-memory store.
@@ -39,35 +37,6 @@ func (m *Mem) States(_ context.Context) ([]StateRow, error) {
 		out = append(out, r)
 	}
 	return out, nil
-}
-
-func (m *Mem) SetNamespaceQuota(_ context.Context, namespace string, quotaBytes int64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.nsQuota = &NamespaceQuotaRow{
-		Namespace: namespace, QuotaBytes: quotaBytes,
-		UpdatedAt: time.Now().UTC(),
-	}
-	return nil
-}
-
-func (m *Mem) DeleteNamespaceQuota(_ context.Context, namespace string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.nsQuota != nil && m.nsQuota.Namespace == namespace {
-		m.nsQuota = nil
-	}
-	return nil
-}
-
-func (m *Mem) NamespaceQuota(_ context.Context, namespace string) (*NamespaceQuotaRow, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.nsQuota != nil && m.nsQuota.Namespace == namespace {
-		cp := *m.nsQuota
-		return &cp, nil
-	}
-	return nil, nil
 }
 
 func (m *Mem) Migrate(context.Context) error { return nil }

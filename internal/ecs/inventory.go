@@ -19,8 +19,12 @@ import (
 // root <object_buckets> (rows in <object_bucket>) and <namespace>; an unset
 // threshold is "-1" (also treated as unset: 0/missing/null).
 //
-// Sizes are byte counts. If lab traffic ever shows small values that are
-// clearly MB, fix the multiplier in exactly one place: the parse helpers below.
+// Quota thresholds (block_size / notification_size, bucket + namespace) are
+// GiB in the ECS API (the UI takes GiB) and are normalized to bytes on parse
+// via gibBytes so quota math against billing bytes is apples-to-apples.
+// default_bucket_block_size is a different field (chunk size for new buckets,
+// already bytes) and is kept as-is, positive-only. If lab traffic contradicts
+// this, fix the unit in exactly one place: gibBytes below.
 
 // BucketMeta is the necessary per-bucket inventory: the ECS-native quota
 // thresholds (see the ECS UI Quota panel: "Block Access at" + "Send
@@ -77,6 +81,19 @@ type NamespaceMeta struct {
 }
 
 const maxInventoryPages = 100
+
+// gibBytes normalizes an ECS GiB threshold to bytes. Non-positive values
+// (including the "-1" unset sentinel) report ok=false.
+func gibBytes(v float64) (int64, bool) {
+	if v <= 0 {
+		return 0, false
+	}
+	bv, err := ToBytes(v, "GiB")
+	if err != nil || bv <= 0 {
+		return 0, false
+	}
+	return bv, true
+}
 
 // BucketMetas lists buckets in a namespace:
 //
@@ -260,11 +277,15 @@ func bucketMetaFromMap(raw json.RawMessage) (BucketMeta, error) {
 	b.Owner = strField(m, "owner")
 	b.VPool = strField(m, "vpool", "vPool", "replication_group")
 	b.APIType = strField(m, "api_type", "apiType")
-	if v, ok := numField(m, "block_size", "blockSize"); ok && v > 0 {
-		b.BlockSize, b.HasBlock = v, true
+	if v, ok := numField(m, "block_size", "blockSize"); ok {
+		if bv, ok := gibBytes(v); ok {
+			b.BlockSize, b.HasBlock = bv, true
+		}
 	}
-	if v, ok := numField(m, "notification_size", "notificationSize"); ok && v > 0 {
-		b.NotificationSize, b.HasNotify = v, true
+	if v, ok := numField(m, "notification_size", "notificationSize"); ok {
+		if bv, ok := gibBytes(v); ok {
+			b.NotificationSize, b.HasNotify = bv, true
+		}
 	}
 	return b, nil
 }
@@ -298,7 +319,7 @@ func strField(m map[string]json.RawMessage, keys ...string) string {
 	return ""
 }
 
-func numField(m map[string]json.RawMessage, keys ...string) (int64, bool) {
+func numField(m map[string]json.RawMessage, keys ...string) (float64, bool) {
 	for _, k := range keys {
 		v, ok := m[k]
 		if !ok {
@@ -307,7 +328,7 @@ func numField(m map[string]json.RawMessage, keys ...string) (int64, bool) {
 		var n json.Number
 		if json.Unmarshal(v, &n) == nil {
 			if f, err := n.Float64(); err == nil {
-				return int64(f), true
+				return f, true
 			}
 		}
 		var s string
@@ -318,7 +339,7 @@ func numField(m map[string]json.RawMessage, keys ...string) (int64, bool) {
 			}
 			var f float64
 			if _, err := fmt.Sscanf(s, "%g", &f); err == nil {
-				return int64(f), true
+				return f, true
 			}
 		}
 	}
@@ -343,13 +364,17 @@ func ParseNamespaceMeta(body []byte, contentType string) (*NamespaceMeta, error)
 		ID:   strField(m, "id"),
 	}
 	if v, ok := numField(m, "default_bucket_block_size", "defaultBucketBlockSize"); ok && v > 0 {
-		out.DefaultBucketBlock, out.HasDefaultBucketBlock = v, true
+		out.DefaultBucketBlock, out.HasDefaultBucketBlock = int64(v), true
 	}
-	if v, ok := numField(m, "block_size", "blockSize"); ok && v > 0 {
-		out.BlockSize, out.HasBlock = v, true
+	if v, ok := numField(m, "block_size", "blockSize"); ok {
+		if bv, ok := gibBytes(v); ok {
+			out.BlockSize, out.HasBlock = bv, true
+		}
 	}
-	if v, ok := numField(m, "notification_size", "notificationSize"); ok && v > 0 {
-		out.NotificationSize, out.HasNotify = v, true
+	if v, ok := numField(m, "notification_size", "notificationSize"); ok {
+		if bv, ok := gibBytes(v); ok {
+			out.NotificationSize, out.HasNotify = bv, true
+		}
 	}
 	if out.Name == "" {
 		return nil, fmt.Errorf("ecs: namespace info missing name")
@@ -401,11 +426,15 @@ func parseBucketListXML(body []byte) ([]BucketMeta, string, error) {
 		}
 		m := BucketMeta{Name: strings.TrimSpace(r.Name), Namespace: strings.TrimSpace(r.Namespace),
 			Owner: strings.TrimSpace(r.Owner), VPool: strings.TrimSpace(r.VPool), APIType: strings.TrimSpace(r.APIType)}
-		if v, err := parseFloat(strings.TrimSpace(r.BlockSize)); err == nil && strings.TrimSpace(r.BlockSize) != "" && v > 0 {
-			m.BlockSize, m.HasBlock = int64(v), true
+		if v, err := parseFloat(strings.TrimSpace(r.BlockSize)); err == nil {
+			if bv, ok := gibBytes(v); ok {
+				m.BlockSize, m.HasBlock = bv, true
+			}
 		}
-		if v, err := parseFloat(strings.TrimSpace(r.NotificationSize)); err == nil && strings.TrimSpace(r.NotificationSize) != "" && v > 0 {
-			m.NotificationSize, m.HasNotify = int64(v), true
+		if v, err := parseFloat(strings.TrimSpace(r.NotificationSize)); err == nil {
+			if bv, ok := gibBytes(v); ok {
+				m.NotificationSize, m.HasNotify = bv, true
+			}
 		}
 		metas = append(metas, m)
 	}
@@ -427,18 +456,22 @@ func parseNamespaceMetaXML(body []byte) (*NamespaceMeta, error) {
 		if s == "" {
 			continue
 		}
-		if v, err := parseFloat(s); err == nil && v > 0 {
-			out.BlockSize, out.HasBlock = int64(v), true
-			break
+		if v, err := parseFloat(s); err == nil {
+			if bv, ok := gibBytes(v); ok {
+				out.BlockSize, out.HasBlock = bv, true
+				break
+			}
 		}
 	}
 	for _, s := range []string{strings.TrimSpace(n.NotificationSize), strings.TrimSpace(n.NotifySizeSnake)} {
 		if s == "" {
 			continue
 		}
-		if v, err := parseFloat(s); err == nil && v > 0 {
-			out.NotificationSize, out.HasNotify = int64(v), true
-			break
+		if v, err := parseFloat(s); err == nil {
+			if bv, ok := gibBytes(v); ok {
+				out.NotificationSize, out.HasNotify = bv, true
+				break
+			}
 		}
 	}
 	if out.Name == "" {

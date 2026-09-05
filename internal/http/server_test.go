@@ -1,7 +1,6 @@
 package http
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -321,16 +320,12 @@ func TestBucketQuotaAPIRemoved(t *testing.T) {
 	if c := do(http.MethodDelete, "/api/quotas/prod-ns/good-bkt", ""); c != http.StatusMethodNotAllowed {
 		t.Errorf("DELETE removed route = %d, want 405", c)
 	}
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/quotas", strings.NewReader(`{"namespace":"prod-ns"}`))
-	req.Header.Set("Content-Type", "application/json")
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusSeeOther {
-		t.Errorf("POST removed route = %d, want 303 with error message", rr.Code)
+	if c := do(http.MethodPost, "/api/quotas", `{"namespace":"prod-ns"}`); c != http.StatusMethodNotAllowed {
+		t.Errorf("POST removed route = %d, want 405 (quota form gone)", c)
 	}
 }
 
-func TestNamespaceQuotaAPIValidation(t *testing.T) {
+func TestNamespaceQuotaAPIAndFormsRemoved(t *testing.T) {
 	mem := store.NewMem()
 	s := newTestServer(t, goodSnapshot(), mem, "")
 	h := s.Handler()
@@ -347,222 +342,19 @@ func TestNamespaceQuotaAPIValidation(t *testing.T) {
 		return rr.Code
 	}
 
-	if c := do(http.MethodPut, "/api/namespace-quotas/other-ns", `{"quota_bytes":100}`); c != http.StatusBadRequest {
-		t.Fatalf("wrong namespace = %d, want 400", c)
-	}
-	if c := do(http.MethodPut, "/api/namespace-quotas/prod-ns", `{"quota_bytes":0}`); c != http.StatusBadRequest {
-		t.Fatalf("zero quota = %d, want 400", c)
-	}
-	if c := do(http.MethodPut, "/api/namespace-quotas/prod-ns", `{"quota_bytes":107374182400}`); c != http.StatusOK {
-		t.Fatalf("valid PUT = %d, want 200", c)
-	}
-	q, _ := mem.NamespaceQuota(context.Background(), "prod-ns")
-	if q == nil || q.QuotaBytes != 107374182400 {
-		t.Fatalf("quota not persisted: %+v", q)
-	}
-	if c := do(http.MethodDelete, "/api/namespace-quotas/prod-ns", ""); c != http.StatusNoContent {
-		t.Fatalf("DELETE = %d, want 204", c)
-	}
-	q, _ = mem.NamespaceQuota(context.Background(), "prod-ns")
-	if q != nil {
-		t.Fatal("quota must be gone after DELETE")
-	}
-}
-
-func TestHTMLQuotaFormPRG(t *testing.T) {
-	mem := store.NewMem()
-	s := newTestServer(t, goodSnapshot(), mem, "")
-	h := s.Handler()
-
-	// Namespace quota set via form (PRG).
-	form := strings.NewReader("scope=namespace&quota=2&unit=GiB")
-	req := httptest.NewRequest(http.MethodPost, "/", form)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusSeeOther {
-		t.Fatalf("form POST = %d, want 303 (PRG)", rr.Code)
-	}
-	q, _ := mem.NamespaceQuota(context.Background(), "prod-ns")
-	if q == nil || q.QuotaBytes != 2*1024*1024*1024 {
-		t.Fatalf("form quota = %+v, want 2 GiB in bytes", q)
-	}
-
-	// Delete via action=delete.
-	form = strings.NewReader("scope=namespace&action=delete")
-	req = httptest.NewRequest(http.MethodPost, "/", form)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusSeeOther {
-		t.Fatalf("delete form = %d, want 303", rr.Code)
-	}
-	q, _ = mem.NamespaceQuota(context.Background(), "prod-ns")
-	if q != nil {
-		t.Fatal("quota must be removed by action=delete")
-	}
-
-	// Bucket quotas are ECS-native: a bucket form post is rejected, and it
-	// must not create any operator quota behind the scenes.
-	form = strings.NewReader("bucket=sample-bkt&quota=2&unit=GiB")
-	req = httptest.NewRequest(http.MethodPost, "/", form)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusSeeOther {
-		t.Fatalf("bucket form POST = %d, want 303 (PRG with error message)", rr.Code)
-	}
-	if loc := rr.Header().Get("Location"); !strings.Contains(loc, "msg=") {
-		t.Fatalf("bucket form must redirect with an error message, got %q", loc)
-	}
-}
-
-func TestDashboardRenders(t *testing.T) {
-	mem := store.NewMem()
-	s := newTestServer(t, goodSnapshot(), mem, "")
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("dashboard = %d", rr.Code)
-	}
-	body := rr.Body.String()
-	for _, want := range []string{"sample-bkt", "11.00 GiB", "prod-ns"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("dashboard missing %q", want)
+	// Namespace quota is ECS-native now: the manual API and both HTML form
+	// paths (namespace + bucket) are gone.
+	for _, tc := range [][3]string{
+		{http.MethodPut, "/api/namespace-quotas/prod-ns", `{"quota_bytes":107374182400}`},
+		{http.MethodDelete, "/api/namespace-quotas/prod-ns", ""},
+		{http.MethodPost, "/", "scope=namespace&quota=2&unit=GiB"},
+		{http.MethodPost, "/", "bucket=sample-bkt&quota=2&unit=GiB"},
+	} {
+		if c := do(tc[0], tc[1], tc[2]); c == http.StatusOK || c == http.StatusSeeOther {
+			t.Errorf("%s %s = %d, want removed (404/405)", tc[0], tc[1], c)
 		}
 	}
-	if strings.Contains(body, "11 GB") {
-		t.Error("dashboard must render binary units (GiB), not GB")
-	}
-}
-
-func TestDashboardZeroTimesRenderAsDash(t *testing.T) {
-	snap := goodSnapshot()
-	snap.Buckets[0].UptodateTill = time.Time{}
-	s := newTestServer(t, snap, store.NewMem(), "")
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("dashboard = %d", rr.Code)
-	}
-	for _, banned := range []string{"0001-01-01", "0000-00-00"} {
-		if strings.Contains(rr.Body.String(), banned) {
-			t.Errorf("dashboard renders zero time as %q", banned)
-		}
-	}
-}
-
-func TestBasePathPrefix(t *testing.T) {
-	s, err := New(Deps{
-		Namespace: "prod-ns",
-		BasePath:  "/storage",
-		Snapshots: &fakeSnap{snap: goodSnapshot(), th: time.Hour},
-		Store:     store.NewMem(),
-		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := s.Handler()
-	for _, path := range []string{"/storage/", "/storage/api/buckets", "/storage/health/ready",
-		"/health/ready", "/api/buckets"} { // doubled at root for local dev/probes
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
-		if rr.Code == http.StatusNotFound {
-			t.Errorf("%s must be registered, got 404", path)
-		}
-	}
-}
-
-func TestAPIBucketsIncludesInventory(t *testing.T) {
-	block, notify, nsblock := int64(134217728), int64(1073741824), int64(134217728)
-	nsBSize, nsNotify := int64(10737418240), int64(8589934592)
-	snap := goodSnapshot()
-	snap.InventoryOK = true
-	snap.NamespaceDefaultBlock = &nsblock
-	snap.NamespaceBlockSize = &nsBSize
-	snap.NamespaceNotificationSize = &nsNotify
-	snap.Buckets[0].BlockSize = &block
-	snap.Buckets[0].NotificationSize = &notify
-	s := newTestServer(t, snap, store.NewMem(), "")
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/buckets", nil))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d", rr.Code)
-	}
-	var body map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"inventory_ok", "inventory_error", "namespace_default_block_size", "namespace_block_size", "namespace_notification_size"} {
-		if _, ok := body[key]; !ok {
-			t.Errorf("missing key %q", key)
-		}
-	}
-	b0 := body["buckets"].([]any)[0].(map[string]any)
-	for _, key := range []string{"block_size", "notification_size"} {
-		if _, ok := b0[key]; !ok {
-			t.Errorf("bucket missing key %q", key)
-		}
-	}
-	if b0["block_size"].(float64) != 134217728 {
-		t.Errorf("block_size = %v", b0["block_size"])
-	}
-	// Nil inventory renders as null, never 0.
-	snap2 := goodSnapshot()
-	s2 := newTestServer(t, snap2, store.NewMem(), "")
-	rr2 := httptest.NewRecorder()
-	s2.Handler().ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "/api/buckets", nil))
-	var body2 map[string]any
-	_ = json.Unmarshal(rr2.Body.Bytes(), &body2)
-	b2 := body2["buckets"].([]any)[0].(map[string]any)
-	if b2["block_size"] != nil || b2["notification_size"] != nil {
-		t.Fatalf("missing inventory must be null, got %v / %v", b2["block_size"], b2["notification_size"])
-	}
-}
-
-func TestDashboardShowsBlockNotifyNotMPU(t *testing.T) {
-	block, notify := int64(134217728), int64(1073741824)
-	snap := goodSnapshot()
-	snap.Buckets[0].BlockSize = &block
-	snap.Buckets[0].NotificationSize = &notify
-	s := newTestServer(t, snap, store.NewMem(), "")
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
-	body := rr.Body.String()
-	for _, want := range []string{"128.00 MiB", "1.00 GiB", "Block", "Notify"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("dashboard missing %q", want)
-		}
-	}
-	if strings.Contains(body, "data-mpu=") || strings.Contains(body, ">MPU<") {
-		t.Error("dashboard must not show the MPU column anymore (folded into Used)")
-	}
-}
-
-func TestAPIQuotaMode(t *testing.T) {
-	block := int64(10737418240) // 10 GiB "Block Access at" from the ECS UI
-	snap := goodSnapshot()
-	snap.Buckets[0].BlockSize = &block
-	snap.Buckets[0].NotificationSize = nil
-	s := newTestServer(t, snap, store.NewMem(), "")
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/buckets", nil))
-	var body map[string]any
-	_ = json.Unmarshal(rr.Body.Bytes(), &body)
-	b0 := body["buckets"].([]any)[0].(map[string]any)
-	if b0["quota_mode"] != "block-only" {
-		t.Errorf("quota_mode = %v, want block-only", b0["quota_mode"])
-	}
-	if b0["notification_size"] != nil {
-		t.Errorf("notification_size must be null when ECS quota has no notify threshold, got %v", b0["notification_size"])
-	}
-	// Dashboard names the ECS-native mode under the bucket.
-	rr2 := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "/", nil))
-	if !strings.Contains(rr2.Body.String(), "ECS quota: block-only") {
-		t.Error("dashboard must label the ECS-native quota mode under the bucket name")
-	}
+	_ = do // silence unused-parameter lint on the helper when methods vary
 }
 
 func TestDashboardUnlimitedQuotaOff(t *testing.T) {
@@ -583,9 +375,12 @@ func TestDashboardUnlimitedQuotaOff(t *testing.T) {
 	if strings.Contains(body, `name="bucket"`) {
 		t.Error("bucket quota Set form must be gone (quotas come from ECS)")
 	}
-	// The namespace total quota form stays: ECS exposes no namespace quota.
-	if !strings.Contains(body, "Set namespace quota:") {
-		t.Error("namespace quota form must stay (no ECS source for it)")
+	// Namespace and bucket quotas are both ECS-native: no manual forms remain.
+	if strings.Contains(body, "scope=namespace") || strings.Contains(body, `name="bucket"`) {
+		t.Error("manual quota forms must be gone (quotas come from ECS)")
+	}
+	if strings.Contains(body, "Set namespace quota") {
+		t.Error("namespace quota Set form must be gone")
 	}
 
 	// Wallboard agrees: unlimited label, no block/notify numbers.

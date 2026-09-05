@@ -14,14 +14,16 @@ in its own image.
 - Size units are **binary** (API `GB` means GiB; Dell KB 000273649).
 - Bucket quotas are ECS-native (Block Access thresholds from the bucket
   inventory poll) with 2-sample hysteresis before `/health/quota` goes 503.
-  Quota-off buckets show Unlimited. Only the namespace total quota is
-  operator-set here — ECS exposes no namespace quota.
+  Namespace quota is also ECS-native now (the namespace-level `blockSize`
+  threshold from `GET /object/namespaces/namespace/{ns}`). Quota-off buckets
+  and namespaces show Unlimited; no quotas are operator-set in this tool.
 
 ## Dashboard columns (necessary only)
 
 Bucket · Used (already includes incomplete multipart uploads) · Objects ·
 Block · Notify are the ECS-native quota thresholds (UI: "Block Access at"
-+ "Send Notification at", in GiB; API in bytes). Modes fall out of the two
++ "Send Notification at", in GiB; API returns GiB and this tool normalizes
+to bytes). Modes fall out of the two
 numbers: Off (—/—) · Notification Only (—/X) · Block Only (X/—) ·
 Block + Notify (X/Y); the dashboard labels the mode under the bucket name.
 A 0/missing threshold means unset (quota off → Unlimited). The % bar and
@@ -184,12 +186,12 @@ is `golang:1.25-alpine` (Go ≥ 1.25 is required by CGO-free
 fixtures matching the documented field set. `bucket_list.json` and
 `namespace_meta.json` are the same for the inventory endpoints (subset of
 EMCECS/python-ecsclient `BUCKET` / `NAMESPACE` schemas: block_size,
-notification_size, default_bucket_block_size, plus namespace-level
-blockSize/notificationSize). Real ECS answers are XML rooted at
-`<object_buckets>` / `<namespace>` with `-1` meaning unset, extra elements
-(softquota, retention, search metadata, links) ignored. If you capture real
-payloads from the lab, redact names if needed but keep the field set, and
-replace these files.
+notification_size in GiB, default_bucket_block_size in raw bytes, plus
+namespace-level blockSize/notificationSize in GiB). Real ECS answers are XML
+rooted at `<object_buckets>` / `<namespace>` with `-1` meaning unset, extra
+elements (softquota, retention, search metadata, links) ignored. If you
+capture real payloads from the lab, redact names if needed but keep the field
+set, and replace these files.
 
 ## Nice to have (not planned yet)
 

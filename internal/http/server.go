@@ -3,7 +3,6 @@
 package http
 
 import (
-	"context"
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
@@ -25,18 +24,6 @@ var assets embed.FS
 type SnapshotSource interface {
 	Snapshot() poller.Snapshot
 	StaleThreshold() time.Duration
-}
-
-// quotaRefresher is optionally implemented by SnapshotSource (the poller does)
-// so quota mutations become visible without waiting for the next poll.
-type quotaRefresher interface {
-	RefreshQuotas(ctx context.Context)
-}
-
-func (s *Server) refreshQuotas(r *http.Request) {
-	if qf, ok := s.deps.Snapshots.(quotaRefresher); ok {
-		qf.RefreshQuotas(r.Context())
-	}
 }
 
 // Deps wires the server.
@@ -122,11 +109,8 @@ func (s *Server) register(mux *http.ServeMux, prefix string) {
 
 	// UI-token-guarded routes (open when UI_TOKEN is empty).
 	mux.HandleFunc("GET "+p+"/", s.securityHeaders(s.uiAuth(s.handleDashboard)))
-	mux.HandleFunc("POST "+p+"/", s.securityHeaders(s.uiAuth(s.handleQuotaForm)))
 	mux.HandleFunc("GET "+p+"/wallboard", s.securityHeaders(s.uiAuth(s.handleWallboard)))
 	mux.HandleFunc("GET "+p+"/api/buckets", s.securityHeaders(s.uiAuth(s.handleAPIBuckets)))
-	mux.HandleFunc("PUT "+p+"/api/namespace-quotas/{ns}", s.securityHeaders(s.uiAuth(s.handleAPISetNamespaceQuota)))
-	mux.HandleFunc("DELETE "+p+"/api/namespace-quotas/{ns}", s.securityHeaders(s.uiAuth(s.handleAPIDeleteNamespaceQuota)))
 }
 
 // securityHeaders sets the locked header set on every response.
@@ -366,56 +350,7 @@ func (s *Server) handleAPIBuckets(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// --- Namespace quota API ---
-
-type nsQuotaRequest struct {
-	QuotaBytes *int64 `json:"quota_bytes"`
-}
-
-func (s *Server) handleAPISetNamespaceQuota(w http.ResponseWriter, r *http.Request) {
-	ns := r.PathValue("ns")
-	if ns != s.deps.Namespace {
-		writeJSONErr(w, http.StatusBadRequest,
-			fmt.Sprintf("namespace must equal %q in v1", s.deps.Namespace))
-		return
-	}
-	var body nsQuotaRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONErr(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
-	if body.QuotaBytes == nil || *body.QuotaBytes <= 0 || *body.QuotaBytes > 1<<62 {
-		writeJSONErr(w, http.StatusBadRequest, "quota_bytes must be a positive integer")
-		return
-	}
-	if err := s.deps.Store.SetNamespaceQuota(r.Context(), ns, *body.QuotaBytes); err != nil {
-		s.deps.Log.Error("set namespace quota failed", "err", err)
-		writeJSONErr(w, http.StatusInternalServerError, "store error")
-		return
-	}
-	s.refreshQuotas(r)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"namespace":   ns,
-		"quota_bytes": *body.QuotaBytes,
-	})
-}
-
-func (s *Server) handleAPIDeleteNamespaceQuota(w http.ResponseWriter, r *http.Request) {
-	ns := r.PathValue("ns")
-	if ns != s.deps.Namespace {
-		writeJSONErr(w, http.StatusBadRequest,
-			fmt.Sprintf("namespace must equal %q in v1", s.deps.Namespace))
-		return
-	}
-	if err := s.deps.Store.DeleteNamespaceQuota(r.Context(), ns); err != nil {
-		s.deps.Log.Error("delete namespace quota failed", "err", err)
-		writeJSONErr(w, http.StatusInternalServerError, "store error")
-		return
-	}
-	s.refreshQuotas(r)
-	w.WriteHeader(http.StatusNoContent)
-}
-
+// quotaModeOf derives the ECS-native quota mode from the two thresholds.
 func quotaModeOf(hasBlock, hasNotify bool) string {
 	switch {
 	case hasBlock && hasNotify:

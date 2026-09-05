@@ -3,8 +3,8 @@
     {
       "name": "sample-bkt",
       "namespace": "prod-ns",
-      "block_size": 134217728,
-      "notification_size": 1073741824,
+      "block_size": 128,
+      "notification_size": 1024,
       "owner": "owner-1",
       "vpool": "rp-1",
       "api_type": "s3",
@@ -15,8 +15,8 @@
     {
       "name": "second-bkt",
       "namespace": "prod-ns",
-      "block_size": "67108864",
-      "notification_size": "536870912",
+      "block_size": "64",
+      "notification_size": "512",
       "owner": "owner-2",
       "vpool": "rp-1",
       "api_type": "s3",

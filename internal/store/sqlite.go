@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
-	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -81,33 +80,6 @@ func (s *SQLite) UpsertStates(ctx context.Context, rows []StateRow) error {
 
 func (s *SQLite) States(ctx context.Context) ([]StateRow, error) {
 	return queryStates(ctx, s.db)
-}
-
-func (s *SQLite) SetNamespaceQuota(ctx context.Context, namespace string, quotaBytes int64) error {
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO ext_ecs_usage_namespace_quotas (namespace, quota_bytes, updated_at)
-VALUES (?, ?, ?)
-ON CONFLICT(namespace) DO UPDATE SET
-  quota_bytes = excluded.quota_bytes, updated_at = excluded.updated_at`,
-		namespace, quotaBytes, time.Now().UTC())
-	if err != nil {
-		return fmt.Errorf("store: set namespace quota %s: %w", namespace, err)
-	}
-	return nil
-}
-
-func (s *SQLite) DeleteNamespaceQuota(ctx context.Context, namespace string) error {
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM ext_ecs_usage_namespace_quotas WHERE namespace = ?`,
-		namespace)
-	if err != nil {
-		return fmt.Errorf("store: delete namespace quota %s: %w", namespace, err)
-	}
-	return nil
-}
-
-func (s *SQLite) NamespaceQuota(ctx context.Context, namespace string) (*NamespaceQuotaRow, error) {
-	return queryNamespaceQuota(ctx, s.db, namespace)
 }
 
 func (s *SQLite) Close() error { return s.db.Close() }
