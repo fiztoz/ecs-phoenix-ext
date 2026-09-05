@@ -232,6 +232,12 @@
       <div class="v tnum {{if or .NamespaceConfirmedOver .NamespaceAtQuota}}color-bad{{else if ge .NamespaceBarWidth 80}}color-warn{{else}}color-ok{{end}}">{{.NamespacePercent}}</div>
     </div>
     {{end}}
+    {{if .HasDefaultBlock}}
+    <div class="stat">
+      <div class="k">Default block</div>
+      <div class="v tnum">{{.NamespaceDefaultBlock}}</div>
+    </div>
+    {{end}}
     <div class="stat">
       <div class="k">Objects</div>
       <div class="v tnum">{{.NamespaceObjects}}</div>
@@ -259,7 +265,8 @@
     {{range .Buckets}}
       <article class="card {{if .ConfirmedOver}}over{{else if ge .BarWidth 80}}yellow{{else if .AtQuota}}atquota{{else if .Stale}}stale{{else}}ok{{end}}">
         <div class="name">{{.Name}}</div>
-        {{if .HasQuota}}<div class="meta-line">quota: {{.Quota}}</div>{{end}}
+        {{if ne .QuotaMode "off"}}<div class="meta-line">block: {{if .HasBlock}}{{.Block}}{{else}}—{{end}} · notify: {{if .HasNotify}}{{.Notify}}{{else}}—{{end}}</div>
+        {{else}}<div class="meta-line">unlimited quota</div>{{end}}
         <div class="used tnum">{{.Used}}</div>
         {{if .HasQuota}}
           <div class="pct {{if or .ConfirmedOver .AtQuota}}color-bad{{else if ge .BarWidth 80}}color-warn{{else}}color-ok{{end}} tnum">{{.Percent}}</div>
@@ -267,13 +274,14 @@
         <div class="card-foot">
           <div>
             <div class="k">Quota</div>
-            <div class="v">{{if .HasQuota}}{{.Quota}}{{else}}—{{end}}</div>
+            <div class="v">{{if .HasQuota}}{{.Quota}}{{else}}Unlimited{{end}}</div>
           </div>
           <div>
             <div class="k">Status</div>
             <div>
               {{if .ConfirmedOver}}<span class="pill bad"><span class="dot dot-bad"></span>over quota</span>
               {{else if ge .BarWidth 80}}<span class="pill warn"><span class="dot dot-warn"></span>80% warning</span>
+              {{else if .NotifyReached}}<span class="pill warn"><span class="dot dot-warn"></span>notify threshold</span>
               {{else if .AtQuota}}<span class="pill warn"><span class="dot dot-warn"></span>at quota</span>
               {{else if .Stale}}<span class="pill warn"><span class="dot dot-warn"></span>stale</span>
               {{else}}<span class="pill ok"><span class="dot dot-up"></span>ok</span>{{end}}

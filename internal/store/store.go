@@ -21,14 +21,6 @@ type StateRow struct {
 	LastError     string
 }
 
-// QuotaRow is one operator-set quota.
-type QuotaRow struct {
-	Namespace  string
-	Bucket     string
-	QuotaBytes int64
-	UpdatedAt  time.Time
-}
-
 // NamespaceQuotaRow is one operator-set namespace-level total quota.
 type NamespaceQuotaRow struct {
 	Namespace  string
@@ -44,12 +36,6 @@ type Store interface {
 	// States returns all durable state rows (used to seed hysteresis after
 	// a restart).
 	States(ctx context.Context) ([]StateRow, error)
-	// SetQuota inserts or replaces a quota (bytes only).
-	SetQuota(ctx context.Context, namespace, bucket string, quotaBytes int64) error
-	// DeleteQuota removes a quota row. Missing rows are not an error.
-	DeleteQuota(ctx context.Context, namespace, bucket string) error
-	// Quotas returns quotas for one namespace keyed by bucket name.
-	Quotas(ctx context.Context, namespace string) (map[string]QuotaRow, error)
 	// SetNamespaceQuota inserts or replaces a namespace-level total quota.
 	SetNamespaceQuota(ctx context.Context, namespace string, quotaBytes int64) error
 	// DeleteNamespaceQuota removes a namespace-level quota. Missing rows are not an error.

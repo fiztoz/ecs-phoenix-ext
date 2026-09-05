@@ -1,0 +1,13 @@
+{
+  "name": "prod-ns",
+  "id": "urn:storageos:VirtualDataCenterDataService:namespace-1",
+  "inactive": false,
+  "is_stale_allowed": false,
+  "is_encryption_enabled": false,
+  "is_compliance_enabled": false,
+  "default_data_services_vpool": "rp-1",
+  "allowed_vpools_list": ["rp-1"],
+  "disallowed_vpools_list": [],
+  "default_bucket_block_size": 134217728,
+  "user_mapping": []
+}

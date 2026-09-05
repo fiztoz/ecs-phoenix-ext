@@ -88,32 +88,6 @@ func (m *MariaDB) States(ctx context.Context) ([]StateRow, error) {
 	return queryStates(ctx, m.db)
 }
 
-func (m *MariaDB) SetQuota(ctx context.Context, namespace, bucket string, quotaBytes int64) error {
-	_, err := m.db.ExecContext(ctx, `
-INSERT INTO ext_ecs_usage_quotas (namespace, bucket, quota_bytes, updated_at)
-VALUES (?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE quota_bytes = VALUES(quota_bytes), updated_at = VALUES(updated_at)`,
-		namespace, bucket, quotaBytes, time.Now().UTC())
-	if err != nil {
-		return fmt.Errorf("store: set quota %s/%s: %w", namespace, bucket, err)
-	}
-	return nil
-}
-
-func (m *MariaDB) DeleteQuota(ctx context.Context, namespace, bucket string) error {
-	_, err := m.db.ExecContext(ctx,
-		`DELETE FROM ext_ecs_usage_quotas WHERE namespace = ? AND bucket = ?`,
-		namespace, bucket)
-	if err != nil {
-		return fmt.Errorf("store: delete quota %s/%s: %w", namespace, bucket, err)
-	}
-	return nil
-}
-
-func (m *MariaDB) Quotas(ctx context.Context, namespace string) (map[string]QuotaRow, error) {
-	return queryQuotas(ctx, m.db, namespace)
-}
-
 func (m *MariaDB) SetNamespaceQuota(ctx context.Context, namespace string, quotaBytes int64) error {
 	_, err := m.db.ExecContext(ctx, `
 INSERT INTO ext_ecs_usage_namespace_quotas (namespace, quota_bytes, updated_at)
@@ -171,29 +145,6 @@ func queryStates(ctx context.Context, db *sql.DB) ([]StateRow, error) {
 		}
 		r.ConfirmedOver = confirmed != 0
 		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-func queryQuotas(ctx context.Context, db *sql.DB, namespace string) (map[string]QuotaRow, error) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT namespace, bucket, quota_bytes, updated_at FROM ext_ecs_usage_quotas WHERE namespace = ?`,
-		namespace)
-	if err != nil {
-		return nil, fmt.Errorf("store: query quotas: %w", err)
-	}
-	defer rows.Close()
-	out := make(map[string]QuotaRow)
-	for rows.Next() {
-		var q QuotaRow
-		var updated any
-		if err := rows.Scan(&q.Namespace, &q.Bucket, &q.QuotaBytes, &updated); err != nil {
-			return nil, fmt.Errorf("store: scan quota: %w", err)
-		}
-		if ut, err := scanTime(updated); err == nil && ut != nil {
-			q.UpdatedAt = *ut
-		}
-		out[q.Bucket] = q
 	}
 	return out, rows.Err()
 }

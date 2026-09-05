@@ -83,33 +83,6 @@ func (s *SQLite) States(ctx context.Context) ([]StateRow, error) {
 	return queryStates(ctx, s.db)
 }
 
-func (s *SQLite) SetQuota(ctx context.Context, namespace, bucket string, quotaBytes int64) error {
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO ext_ecs_usage_quotas (namespace, bucket, quota_bytes, updated_at)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(namespace, bucket) DO UPDATE SET
-  quota_bytes = excluded.quota_bytes, updated_at = excluded.updated_at`,
-		namespace, bucket, quotaBytes, time.Now().UTC())
-	if err != nil {
-		return fmt.Errorf("store: set quota %s/%s: %w", namespace, bucket, err)
-	}
-	return nil
-}
-
-func (s *SQLite) DeleteQuota(ctx context.Context, namespace, bucket string) error {
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM ext_ecs_usage_quotas WHERE namespace = ? AND bucket = ?`,
-		namespace, bucket)
-	if err != nil {
-		return fmt.Errorf("store: delete quota %s/%s: %w", namespace, bucket, err)
-	}
-	return nil
-}
-
-func (s *SQLite) Quotas(ctx context.Context, namespace string) (map[string]QuotaRow, error) {
-	return queryQuotas(ctx, s.db, namespace)
-}
-
 func (s *SQLite) SetNamespaceQuota(ctx context.Context, namespace string, quotaBytes int64) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO ext_ecs_usage_namespace_quotas (namespace, quota_bytes, updated_at)

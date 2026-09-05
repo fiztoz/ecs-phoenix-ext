@@ -52,7 +52,7 @@ func payload(usedBytes int64, uptodateAgo time.Duration, now time.Time) *ecs.Bil
 		}},
 	}
 }
-func newTestPoller(t *testing.T, src *fakeSource, mem *store.Mem, now time.Time) *Poller {
+func newTestPoller(t *testing.T, src BillingSource, mem *store.Mem, now time.Time) *Poller {
 	t.Helper()
 	p := New(context.Background(), src, mem, "prod-ns", 15*time.Minute, quietLog())
 	p.now = func() time.Time { return now }
@@ -123,14 +123,18 @@ func TestStaleThresholdFloor(t *testing.T) {
 func TestHysteresisTwoSamples(t *testing.T) {
 	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
 	mem := store.NewMem()
-	if err := mem.SetQuota(context.Background(), "prod-ns", "bkt-one", 100); err != nil {
-		t.Fatal(err)
+	// ECS Block Access threshold of 100 acts as the quota.
+	src := &fullSource{
+		fakeSource: fakeSource{results: []pollResult{
+			{payload: payload(200, 0, now)}, // over, sample 1
+			{payload: payload(200, 0, now)}, // over, sample 2 → confirmed
+			{payload: payload(50, 0, now)},  // under → reset
+		}},
+		metas: map[string]ecs.BucketMeta{
+			"bkt-one": {Name: "bkt-one", BlockSize: 100, HasBlock: true},
+		},
+		nsmeta: &ecs.NamespaceMeta{Name: "prod-ns"},
 	}
-	src := &fakeSource{results: []pollResult{
-		{payload: payload(200, 0, now)}, // over, sample 1
-		{payload: payload(200, 0, now)}, // over, sample 2 → confirmed
-		{payload: payload(50, 0, now)},  // under → reset
-	}}
 	p := newTestPoller(t, src, mem, now)
 
 	p.PollOnce(context.Background())
@@ -159,13 +163,16 @@ func TestHysteresisTwoSamples(t *testing.T) {
 func TestConfirmedAlarmSurvivesRestart(t *testing.T) {
 	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
 	mem := store.NewMem()
-	if err := mem.SetQuota(context.Background(), "prod-ns", "bkt-one", 100); err != nil {
-		t.Fatal(err)
+	src := &fullSource{
+		fakeSource: fakeSource{results: []pollResult{
+			{payload: payload(200, 0, now)},
+			{payload: payload(200, 0, now)},
+		}},
+		metas: map[string]ecs.BucketMeta{
+			"bkt-one": {Name: "bkt-one", BlockSize: 100, HasBlock: true},
+		},
+		nsmeta: &ecs.NamespaceMeta{Name: "prod-ns"},
 	}
-	src := &fakeSource{results: []pollResult{
-		{payload: payload(200, 0, now)},
-		{payload: payload(200, 0, now)},
-	}}
 	p := newTestPoller(t, src, mem, now)
 	p.PollOnce(context.Background())
 	p.PollOnce(context.Background())
@@ -200,53 +207,44 @@ func TestNoQuotaNeverConfirmed(t *testing.T) {
 	}
 }
 
-func TestRefreshQuotasUpdatesSnapshotImmediately(t *testing.T) {
+func TestRefreshQuotasLeavesECSBucketQuotasAlone(t *testing.T) {
 	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
 	mem := store.NewMem()
-	src := &fakeSource{results: []pollResult{
-		{payload: payload(100, 0, now)},
-		{payload: payload(100, 0, now)},
-	}}
+	src := &fullSource{
+		fakeSource: fakeSource{results: []pollResult{
+			{payload: payload(100, 0, now)},
+		}},
+		metas: map[string]ecs.BucketMeta{
+			"bkt-one": {Name: "bkt-one", BlockSize: 50, HasBlock: true},
+		},
+		nsmeta: &ecs.NamespaceMeta{Name: "prod-ns"},
+	}
 	p := newTestPoller(t, src, mem, now)
 	p.PollOnce(context.Background())
-
-	// Set a quota below used: visible on the snapshot without a new poll,
-	// but one sample alone must not confirm the alarm.
-	if err := mem.SetQuota(context.Background(), "prod-ns", "bkt-one", 50); err != nil {
-		t.Fatal(err)
-	}
-	p.RefreshQuotas(context.Background())
 	b := p.Snapshot().Buckets[0]
 	if b.QuotaBytes == nil || *b.QuotaBytes != 50 {
-		t.Fatalf("quota not visible after refresh: %+v", b)
-	}
-	if b.UsedPercent == nil || *b.UsedPercent != 200 {
-		t.Fatalf("percent = %v, want 200%%", b.UsedPercent)
-	}
-	if b.ConfirmedOver || b.OverStreak != 1 {
-		t.Fatalf("one sample must not confirm: %+v", b)
+		t.Fatalf("ECS block threshold must be the quota: %+v", b)
 	}
 
-	// The next poll keeps the hysteresis going (sample 2 confirms).
-	p.PollOnce(context.Background())
-	if b := p.Snapshot().Buckets[0]; !b.ConfirmedOver {
-		t.Fatalf("second over sample must confirm: %+v", b)
-	}
-
-	// Deleting the quota clears it from the snapshot right away.
-	if err := mem.DeleteQuota(context.Background(), "prod-ns", "bkt-one"); err != nil {
+	// A namespace quota set becomes visible without a new poll, while the
+	// ECS bucket quota fields are untouched.
+	if err := mem.SetNamespaceQuota(context.Background(), "prod-ns", 1000); err != nil {
 		t.Fatal(err)
 	}
 	p.RefreshQuotas(context.Background())
-	b = p.Snapshot().Buckets[0]
-	if b.QuotaBytes != nil || b.UsedPercent != nil || b.ConfirmedOver || b.OverStreak != 0 {
-		t.Fatalf("quota delete not reflected: %+v", b)
+	snap := p.Snapshot()
+	if snap.NamespaceQuotaBytes == nil || *snap.NamespaceQuotaBytes != 1000 {
+		t.Fatalf("namespace quota not visible after refresh: %+v", snap)
+	}
+	b = snap.Buckets[0]
+	if b.QuotaBytes == nil || *b.QuotaBytes != 50 || b.OverStreak != 1 || b.ConfirmedOver {
+		t.Fatalf("bucket ECS quota must be untouched by refresh: %+v", b)
 	}
 }
 
 func TestRefreshQuotasBeforeFirstPollIsNoop(t *testing.T) {
 	mem := store.NewMem()
-	if err := mem.SetQuota(context.Background(), "prod-ns", "bkt-one", 50); err != nil {
+	if err := mem.SetNamespaceQuota(context.Background(), "prod-ns", 50); err != nil {
 		t.Fatal(err)
 	}
 	p := New(context.Background(), &fakeSource{}, mem, "prod-ns", 15*time.Minute, quietLog())
@@ -364,5 +362,73 @@ func TestNamespaceQuotaRefresh(t *testing.T) {
 	snap = p.Snapshot()
 	if snap.NamespaceQuotaBytes != nil || snap.NamespaceUsedPercent != nil || snap.NamespaceConfirmedOver {
 		t.Fatalf("namespace quota delete not reflected: %+v", snap)
+	}
+}
+
+// fullSource is a BillingSource plus the optional inventory overlay.
+type fullSource struct {
+	fakeSource
+	metas  map[string]ecs.BucketMeta
+	nsmeta *ecs.NamespaceMeta
+	berr   error
+	nerr   error
+}
+
+func (f *fullSource) BucketMetas(context.Context, string) (map[string]ecs.BucketMeta, error) {
+	return f.metas, f.berr
+}
+
+func (f *fullSource) NamespaceMetaInfo(context.Context, string) (*ecs.NamespaceMeta, error) {
+	return f.nsmeta, f.nerr
+}
+
+func TestInventoryEnrichMergesBlockNotify(t *testing.T) {
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	src := &fullSource{
+		fakeSource: fakeSource{results: []pollResult{{payload: payload(100, 0, now)}}},
+		metas: map[string]ecs.BucketMeta{
+			"bkt-one": {Name: "bkt-one", BlockSize: 134217728, NotificationSize: 1024, HasBlock: true, HasNotify: true},
+		},
+		nsmeta: &ecs.NamespaceMeta{Name: "prod-ns", DefaultBucketBlock: 134217728, HasDefaultBucketBlock: true},
+	}
+	mem := store.NewMem()
+	p := New(context.Background(), src, mem, "prod-ns", 15*time.Minute, quietLog())
+	p.now = func() time.Time { return now }
+	p.PollOnce(context.Background())
+
+	snap := p.Snapshot()
+	if !snap.InventoryOK || snap.InventoryError != "" {
+		t.Fatalf("inventory should succeed: %+v", snap)
+	}
+	if snap.NamespaceDefaultBlock == nil || *snap.NamespaceDefaultBlock != 134217728 {
+		t.Fatalf("namespace default block missing: %+v", snap)
+	}
+	b := snap.Buckets[0]
+	if b.BlockSize == nil || *b.BlockSize != 134217728 {
+		t.Fatalf("block not merged: %+v", b)
+	}
+	if b.NotificationSize == nil || *b.NotificationSize != 1024 {
+		t.Fatalf("notify not merged: %+v", b)
+	}
+}
+
+func TestInventoryFailureKeepsBilling(t *testing.T) {
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	src := &fullSource{
+		fakeSource: fakeSource{results: []pollResult{{payload: payload(100, 0, now)}}},
+		berr:       errors.New("ecs: bucket list returned HTTP 503"),
+		nerr:       errors.New("ecs: namespace info returned HTTP 503"),
+	}
+	mem := store.NewMem()
+	p := New(context.Background(), src, mem, "prod-ns", 15*time.Minute, quietLog())
+	p.now = func() time.Time { return now }
+	p.PollOnce(context.Background())
+
+	snap := p.Snapshot()
+	if !snap.PollOK || len(snap.Buckets) != 1 {
+		t.Fatalf("billing must survive inventory failure: %+v", snap)
+	}
+	if snap.InventoryOK || snap.InventoryError == "" {
+		t.Fatalf("inventory error must be recorded: %+v", snap)
 	}
 }

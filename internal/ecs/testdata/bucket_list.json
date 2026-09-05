@@ -1,0 +1,29 @@
+{
+  "object_bucket": [
+    {
+      "name": "sample-bkt",
+      "namespace": "prod-ns",
+      "block_size": 134217728,
+      "notification_size": 1073741824,
+      "owner": "owner-1",
+      "vpool": "rp-1",
+      "api_type": "s3",
+      "created": "2026-01-10T00:00:00Z",
+      "TagSet": [],
+      "search_metadata": {"search_enabled": false, "max_keys": 1000, "metadata": []}
+    },
+    {
+      "name": "second-bkt",
+      "namespace": "prod-ns",
+      "block_size": "67108864",
+      "notification_size": "536870912",
+      "owner": "owner-2",
+      "vpool": "rp-1",
+      "api_type": "s3",
+      "created": "2026-02-01T00:00:00Z"
+    }
+  ],
+  "Filter": "namespace==prod-ns",
+  "MaxBuckets": 1000,
+  "next_marker": ""
+}

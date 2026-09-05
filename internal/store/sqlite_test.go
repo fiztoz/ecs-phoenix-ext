@@ -31,38 +31,6 @@ func TestSQLiteMigrateIdempotent(t *testing.T) {
 	}
 }
 
-func TestSQLiteQuotaRoundtrip(t *testing.T) {
-	s := openTestSQLite(t)
-	ctx := context.Background()
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetQuota(ctx, "ns", "bkt", 1234); err != nil {
-		t.Fatal(err)
-	}
-	// Replace.
-	if err := s.SetQuota(ctx, "ns", "bkt", 9999); err != nil {
-		t.Fatal(err)
-	}
-	q, err := s.Quotas(ctx, "ns")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if q["bkt"].QuotaBytes != 9999 {
-		t.Fatalf("quota = %+v, want 9999", q)
-	}
-	if err := s.DeleteQuota(ctx, "ns", "bkt"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.DeleteQuota(ctx, "ns", "bkt"); err != nil {
-		t.Fatalf("deleting a missing quota must not error: %v", err)
-	}
-	q, _ = s.Quotas(ctx, "ns")
-	if len(q) != 0 {
-		t.Fatalf("quotas after delete = %+v", q)
-	}
-}
-
 func TestSQLiteStateRoundtripUTC(t *testing.T) {
 	s := openTestSQLite(t)
 	ctx := context.Background()

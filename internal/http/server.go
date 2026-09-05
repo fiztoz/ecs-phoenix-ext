@@ -125,9 +125,6 @@ func (s *Server) register(mux *http.ServeMux, prefix string) {
 	mux.HandleFunc("POST "+p+"/", s.securityHeaders(s.uiAuth(s.handleQuotaForm)))
 	mux.HandleFunc("GET "+p+"/wallboard", s.securityHeaders(s.uiAuth(s.handleWallboard)))
 	mux.HandleFunc("GET "+p+"/api/buckets", s.securityHeaders(s.uiAuth(s.handleAPIBuckets)))
-	mux.HandleFunc("POST "+p+"/api/quotas", s.securityHeaders(s.uiAuth(s.handleAPISetQuotaBody)))
-	mux.HandleFunc("PUT "+p+"/api/quotas/{ns}/{bucket}", s.securityHeaders(s.uiAuth(s.handleAPISetQuotaPath)))
-	mux.HandleFunc("DELETE "+p+"/api/quotas/{ns}/{bucket}", s.securityHeaders(s.uiAuth(s.handleAPIDeleteQuota)))
 	mux.HandleFunc("PUT "+p+"/api/namespace-quotas/{ns}", s.securityHeaders(s.uiAuth(s.handleAPISetNamespaceQuota)))
 	mux.HandleFunc("DELETE "+p+"/api/namespace-quotas/{ns}", s.securityHeaders(s.uiAuth(s.handleAPIDeleteNamespaceQuota)))
 }
@@ -290,32 +287,38 @@ func (s *Server) handleIcon(w http.ResponseWriter, _ *http.Request) {
 // --- JSON API ---
 
 type apiBucket struct {
-	Name          string   `json:"name"`
-	Namespace     string   `json:"namespace"`
-	UsedBytes     int64    `json:"used_bytes"`
-	Objects       int64    `json:"objects"`
-	MPUBytes      int64    `json:"mpu_bytes"`
-	QuotaBytes    *int64   `json:"quota_bytes"` // null when unset
-	UsedPercent   *float64 `json:"used_percent"`
-	Stale         bool     `json:"stale"`
-	AtQuota       bool     `json:"at_quota"`
-	OverStreak    int      `json:"over_streak"`
-	ConfirmedOver bool     `json:"confirmed_over"`
+	Name             string   `json:"name"`
+	Namespace        string   `json:"namespace"`
+	UsedBytes        int64    `json:"used_bytes"`
+	Objects          int64    `json:"objects"`
+	MPUBytes         int64    `json:"mpu_bytes"`
+	BlockSize        *int64   `json:"block_size"`        // null until inventory succeeds / when ECS quota off
+	NotificationSize *int64   `json:"notification_size"` // null until inventory succeeds / when ECS quota off
+	QuotaMode        string   `json:"quota_mode"`        // off | notify-only | block-only | block-notify (ECS-native)
+	QuotaBytes       *int64   `json:"quota_bytes"`       // null when unset
+	UsedPercent      *float64 `json:"used_percent"`
+	Stale            bool     `json:"stale"`
+	AtQuota          bool     `json:"at_quota"`
+	OverStreak       int      `json:"over_streak"`
+	ConfirmedOver    bool     `json:"confirmed_over"`
 }
 
 type apiResponse struct {
-	Namespace                string      `json:"namespace"`
-	PolledAt                 time.Time   `json:"polled_at"`
-	PollOK                   bool        `json:"poll_ok"`
-	LastError                string      `json:"last_error"`
-	NamespaceUsedBytes       int64       `json:"namespace_used_bytes"`
-	NamespaceObjects         int64       `json:"namespace_objects"`
-	NamespaceQuotaBytes      *int64      `json:"namespace_quota_bytes"`
-	NamespaceUsedPercent     *float64    `json:"namespace_used_percent"`
-	NamespaceAtQuota         bool        `json:"namespace_at_quota"`
-	NamespaceConfirmedOver   bool        `json:"namespace_confirmed_over"`
-	StaleAfterSeconds        int64       `json:"stale_after_seconds"`
-	Buckets                  []apiBucket `json:"buckets"`
+	Namespace              string      `json:"namespace"`
+	PolledAt               time.Time   `json:"polled_at"`
+	PollOK                 bool        `json:"poll_ok"`
+	LastError              string      `json:"last_error"`
+	InventoryOK            bool        `json:"inventory_ok"`
+	InventoryError         string      `json:"inventory_error"`
+	NamespaceUsedBytes     int64       `json:"namespace_used_bytes"`
+	NamespaceObjects       int64       `json:"namespace_objects"`
+	NamespaceQuotaBytes    *int64      `json:"namespace_quota_bytes"`
+	NamespaceUsedPercent   *float64    `json:"namespace_used_percent"`
+	NamespaceDefaultBlock  *int64      `json:"namespace_default_block_size"`
+	NamespaceAtQuota       bool        `json:"namespace_at_quota"`
+	NamespaceConfirmedOver bool        `json:"namespace_confirmed_over"`
+	StaleAfterSeconds      int64       `json:"stale_after_seconds"`
+	Buckets                []apiBucket `json:"buckets"`
 }
 
 func (s *Server) handleAPIBuckets(w http.ResponseWriter, _ *http.Request) {
@@ -325,10 +328,13 @@ func (s *Server) handleAPIBuckets(w http.ResponseWriter, _ *http.Request) {
 		PolledAt:               snap.PolledAt.UTC(),
 		PollOK:                 snap.PollOK,
 		LastError:              snap.LastError,
+		InventoryOK:            snap.InventoryOK,
+		InventoryError:         snap.InventoryError,
 		NamespaceUsedBytes:     snap.NamespaceBytes,
 		NamespaceObjects:       snap.NamespaceObjects,
 		NamespaceQuotaBytes:    snap.NamespaceQuotaBytes,
 		NamespaceUsedPercent:   snap.NamespaceUsedPercent,
+		NamespaceDefaultBlock:  snap.NamespaceDefaultBlock,
 		NamespaceAtQuota:       snap.NamespaceAtQuota,
 		NamespaceConfirmedOver: snap.NamespaceConfirmedOver,
 		StaleAfterSeconds:      int64(s.deps.Snapshots.StaleThreshold().Seconds()),
@@ -336,96 +342,24 @@ func (s *Server) handleAPIBuckets(w http.ResponseWriter, _ *http.Request) {
 	}
 	for _, b := range snap.Buckets {
 		ab := apiBucket{
-			Name:          b.Name,
-			Namespace:     b.Namespace,
-			UsedBytes:     b.UsedBytes,
-			Objects:       b.Objects,
-			MPUBytes:      b.MPUBytes,
-			QuotaBytes:    b.QuotaBytes,
-			UsedPercent:   b.UsedPercent,
-			Stale:         b.Stale,
-			AtQuota:       b.AtQuota,
-			OverStreak:    b.OverStreak,
-			ConfirmedOver: b.ConfirmedOver,
+			Name:             b.Name,
+			Namespace:        b.Namespace,
+			UsedBytes:        b.UsedBytes,
+			Objects:          b.Objects,
+			MPUBytes:         b.MPUBytes,
+			BlockSize:        b.BlockSize,
+			NotificationSize: b.NotificationSize,
+			QuotaMode:        quotaModeOf(b.BlockSize != nil, b.NotificationSize != nil),
+			QuotaBytes:       b.QuotaBytes,
+			UsedPercent:      b.UsedPercent,
+			Stale:            b.Stale,
+			AtQuota:          b.AtQuota,
+			OverStreak:       b.OverStreak,
+			ConfirmedOver:    b.ConfirmedOver,
 		}
 		resp.Buckets = append(resp.Buckets, ab)
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-type quotaRequest struct {
-	Namespace  string `json:"namespace"`
-	Bucket     string `json:"bucket"`
-	QuotaBytes *int64 `json:"quota_bytes"`
-}
-
-func (s *Server) handleAPISetQuotaPath(w http.ResponseWriter, r *http.Request) {
-	var body quotaRequest
-	if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
-			writeJSONErr(w, http.StatusBadRequest, "invalid JSON body")
-			return
-		}
-	}
-	body.Namespace = r.PathValue("ns")
-	body.Bucket = r.PathValue("bucket")
-	s.setQuota(w, r, body)
-}
-
-func (s *Server) handleAPISetQuotaBody(w http.ResponseWriter, r *http.Request) {
-	var body quotaRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONErr(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
-	s.setQuota(w, r, body)
-}
-
-func (s *Server) setQuota(w http.ResponseWriter, r *http.Request, q quotaRequest) {
-	if q.Namespace != s.deps.Namespace {
-		writeJSONErr(w, http.StatusBadRequest,
-			fmt.Sprintf("namespace must equal %q in v1", s.deps.Namespace))
-		return
-	}
-	if err := validateBucket(q.Bucket); err != nil {
-		writeJSONErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if q.QuotaBytes == nil || *q.QuotaBytes <= 0 || *q.QuotaBytes > 1<<62 {
-		writeJSONErr(w, http.StatusBadRequest, "quota_bytes must be a positive integer")
-		return
-	}
-	if err := s.deps.Store.SetQuota(r.Context(), q.Namespace, q.Bucket, *q.QuotaBytes); err != nil {
-		s.deps.Log.Error("set quota failed", "err", err)
-		writeJSONErr(w, http.StatusInternalServerError, "store error")
-		return
-	}
-	s.refreshQuotas(r)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"namespace":   q.Namespace,
-		"bucket":      q.Bucket,
-		"quota_bytes": *q.QuotaBytes,
-	})
-}
-
-func (s *Server) handleAPIDeleteQuota(w http.ResponseWriter, r *http.Request) {
-	ns, bucket := r.PathValue("ns"), r.PathValue("bucket")
-	if ns != s.deps.Namespace {
-		writeJSONErr(w, http.StatusBadRequest,
-			fmt.Sprintf("namespace must equal %q in v1", s.deps.Namespace))
-		return
-	}
-	if err := validateBucket(bucket); err != nil {
-		writeJSONErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := s.deps.Store.DeleteQuota(r.Context(), ns, bucket); err != nil {
-		s.deps.Log.Error("delete quota failed", "err", err)
-		writeJSONErr(w, http.StatusInternalServerError, "store error")
-		return
-	}
-	s.refreshQuotas(r)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- Namespace quota API ---
@@ -478,14 +412,17 @@ func (s *Server) handleAPIDeleteNamespaceQuota(w http.ResponseWriter, r *http.Re
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func validateBucket(name string) error {
-	if len(name) < 3 || len(name) > 255 {
-		return fmt.Errorf("bucket name must be 3-255 characters")
+func quotaModeOf(hasBlock, hasNotify bool) string {
+	switch {
+	case hasBlock && hasNotify:
+		return "block-notify"
+	case hasBlock:
+		return "block-only"
+	case hasNotify:
+		return "notify-only"
+	default:
+		return "off"
 	}
-	if strings.Contains(name, "/") {
-		return fmt.Errorf("bucket name must not contain '/'")
-	}
-	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

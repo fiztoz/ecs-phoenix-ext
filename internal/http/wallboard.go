@@ -8,23 +8,25 @@ import (
 )
 
 type wallboardData struct {
-	BasePath              string
-	Namespace             string
-	Now                   time.Time
-	PolledAt              time.Time
-	PollOK                bool
-	LastError             string
-	NamespaceUsed         string
-	NamespaceUsedBytes    int64
-	NamespaceObjects      int64
-	NamespaceHasQuota     bool
-	NamespaceQuota        string
-	NamespaceQuotaBytes   int64
-	NamespacePercent      string
-	NamespaceBarWidth     int
-	NamespaceAtQuota      bool
+	BasePath               string
+	Namespace              string
+	Now                    time.Time
+	PolledAt               time.Time
+	PollOK                 bool
+	LastError              string
+	NamespaceUsed          string
+	NamespaceUsedBytes     int64
+	NamespaceObjects       int64
+	NamespaceHasQuota      bool
+	NamespaceQuota         string
+	NamespaceQuotaBytes    int64
+	NamespacePercent       string
+	NamespaceBarWidth      int
+	NamespaceAtQuota       bool
 	NamespaceConfirmedOver bool
-	Buckets               []bucketView
+	NamespaceDefaultBlock  string
+	HasDefaultBlock        bool
+	Buckets                []bucketView
 }
 
 func (s *Server) handleWallboard(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +56,10 @@ func (s *Server) handleWallboard(w http.ResponseWriter, r *http.Request) {
 			data.NamespaceBarWidth = barWidth(snap.NamespaceUsedPercent)
 		}
 	}
+	if snap.NamespaceDefaultBlock != nil {
+		data.HasDefaultBlock = true
+		data.NamespaceDefaultBlock = HumanBytes(*snap.NamespaceDefaultBlock)
+	}
 
 	for _, b := range snap.Buckets {
 		data.Buckets = append(data.Buckets, toBucketView(b))
@@ -79,8 +85,8 @@ func severityRank(b bucketView) int {
 	switch {
 	case b.ConfirmedOver:
 		return 0 // over quota - highest priority
-	case b.BarWidth >= 80:
-		return 1 // yellow warning at 80% - after over quota
+	case b.BarWidth >= 80 || b.NotifyReached:
+		return 1 // yellow warning: 80% of block or ECS notify threshold
 	case b.AtQuota:
 		return 2 // at quota
 	case b.Stale:

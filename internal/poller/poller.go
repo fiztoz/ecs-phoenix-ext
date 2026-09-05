@@ -20,36 +20,53 @@ type BillingSource interface {
 	NamespaceBilling(ctx context.Context, namespace string) (*ecs.BillingPayload, error)
 }
 
+// inventorySource is optionally implemented by the ECS client. The poller
+// type-asserts for it so fixture fakes that only do billing keep working.
+type inventorySource interface {
+	BucketMetas(ctx context.Context, namespace string) (map[string]ecs.BucketMeta, error)
+	NamespaceMetaInfo(ctx context.Context, namespace string) (*ecs.NamespaceMeta, error)
+}
+
 // BucketState is one bucket as shown to the HTTP layer.
 type BucketState struct {
-	Name          string
-	Namespace     string
-	UsedBytes     int64
-	Objects       int64
-	MPUBytes      int64
-	QuotaBytes    *int64 // nil when no quota is set
-	UsedPercent   *float64
-	UptodateTill  time.Time
-	Stale         bool
-	AtQuota       bool // used >= quota: ECS rejects further writes
-	OverStreak    int
-	ConfirmedOver bool
+	Name             string
+	Namespace        string
+	UsedBytes        int64
+	Objects          int64
+	MPUBytes         int64
+	QuotaBytes       *int64 // nil when no quota is set
+	UsedPercent      *float64
+	BlockSize        *int64 // nil when inventory has not reported it yet
+	NotificationSize *int64 // nil when inventory has not reported it yet
+	UptodateTill     time.Time
+	Stale            bool
+	AtQuota          bool // used >= quota: ECS rejects further writes
+	OverStreak       int
+	ConfirmedOver    bool
 }
 
 // Snapshot is the poller's last observation.
 type Snapshot struct {
-	Namespace            string
-	PolledAt             time.Time
-	PollOK               bool
-	LastError            string
-	NamespaceBytes       int64
-	NamespaceObjects     int64
-	NamespaceQuotaBytes  *int64   // nil when no namespace quota is set
-	NamespaceUsedPercent *float64
-	NamespaceAtQuota     bool
-	NamespaceOverStreak  int
+	Namespace              string
+	PolledAt               time.Time
+	PollOK                 bool
+	LastError              string
+	NamespaceBytes         int64
+	NamespaceObjects       int64
+	NamespaceQuotaBytes    *int64 // nil when no namespace quota is set
+	NamespaceUsedPercent   *float64
+	NamespaceAtQuota       bool
+	NamespaceOverStreak    int
 	NamespaceConfirmedOver bool
-	Buckets              []BucketState
+	// NamespaceDefaultBlock is the ECS default_bucket_block_size from
+	// GET /object/namespaces/namespace/{ns}; nil until inventory succeeds.
+	NamespaceDefaultBlock *int64
+	// InventoryOK reports whether the last bucket/namespace info enrich
+	// succeeded. Billing is the source of truth: a failed inventory never
+	// flips PollOK, it only sets InventoryError.
+	InventoryOK    bool
+	InventoryError string
+	Buckets        []BucketState
 }
 
 // Poller polls ECS billing on an interval and maintains hysteresis state.
@@ -154,12 +171,6 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		return
 	}
 
-	quotas, qerr := p.store.Quotas(ctx, p.namespace)
-	if qerr != nil {
-		p.log.Warn("poller: quota lookup failed; hysteresis uses no quotas", "err", qerr)
-		quotas = map[string]store.QuotaRow{}
-	}
-
 	nsQuota, nsqErr := p.store.NamespaceQuota(ctx, p.namespace)
 	if nsqErr != nil {
 		p.log.Warn("poller: namespace quota lookup failed", "err", nsqErr)
@@ -168,13 +179,34 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	prev := p.previousStreaks()
 	th := p.StaleThreshold()
 
+	// Bucket quotas are ECS-native (Block Access thresholds from the bucket
+	// inventory poll), never operator-set. A failed inventory keeps billing
+	// live; thresholds fall back to the previous poll so hysteresis
+	// survives a transient enrich failure.
+	metas, nsmeta, invOK, invErr := p.fetchInventory(ctx)
+	if !invOK {
+		for name, pm := range p.previousInventory() {
+			if _, ok := metas[name]; !ok {
+				metas[name] = pm
+			}
+		}
+	}
+
 	rows := make([]store.StateRow, 0, len(payload.Buckets))
 	buckets := make([]BucketState, 0, len(payload.Buckets))
 	for _, b := range payload.Buckets {
-		var qp *int64
-		if q, ok := quotas[b.Name]; ok {
-			v := q.QuotaBytes
-			qp = &v
+		// ECS Block Access threshold is the quota; quota-off buckets
+		// (no block threshold) have no quota: unlimited.
+		var qp, block, notify *int64
+		if m, ok := metas[b.Name]; ok {
+			if m.HasBlock {
+				v := m.BlockSize
+				block, qp = &v, &v
+			}
+			if m.HasNotify {
+				v := m.NotificationSize
+				notify = &v
+			}
 		}
 		streak, confirmed := quota.Apply(prev[b.Name], qp, b.UsedBytes)
 
@@ -193,17 +225,19 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		})
 
 		bs := BucketState{
-			Name:          b.Name,
-			Namespace:     b.Namespace,
-			UsedBytes:     b.UsedBytes,
-			Objects:       b.Objects,
-			MPUBytes:      b.MPUBytes,
-			QuotaBytes:    qp,
-			UptodateTill:  uptodate.UTC(),
-			Stale:         !uptodate.IsZero() && now.Sub(uptodate) > th,
-			AtQuota:       qp != nil && b.UsedBytes >= *qp,
-			OverStreak:    streak,
-			ConfirmedOver: confirmed,
+			Name:             b.Name,
+			Namespace:        b.Namespace,
+			UsedBytes:        b.UsedBytes,
+			Objects:          b.Objects,
+			MPUBytes:         b.MPUBytes,
+			QuotaBytes:       qp,
+			BlockSize:        block,
+			NotificationSize: notify,
+			UptodateTill:     uptodate.UTC(),
+			Stale:            !uptodate.IsZero() && now.Sub(uptodate) > th,
+			AtQuota:          qp != nil && b.UsedBytes >= *qp,
+			OverStreak:       streak,
+			ConfirmedOver:    confirmed,
 		}
 		if qp != nil && *qp > 0 {
 			pct := float64(b.UsedBytes) / float64(*qp) * 100
@@ -233,6 +267,11 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	}
 
 	p.mu.Lock()
+	prevNSBlock := p.snap.NamespaceDefaultBlock
+	if nsmeta != nil && nsmeta.HasDefaultBucketBlock {
+		v := nsmeta.DefaultBucketBlock
+		prevNSBlock = &v
+	}
 	p.snap = Snapshot{
 		Namespace:              p.namespace,
 		PolledAt:               now,
@@ -245,10 +284,67 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		NamespaceAtQuota:       nsAtQuota,
 		NamespaceOverStreak:    nsStreak,
 		NamespaceConfirmedOver: nsConfirmed,
+		NamespaceDefaultBlock:  prevNSBlock,
+		InventoryOK:            invOK,
+		InventoryError:         invErr,
 		Buckets:                buckets,
 	}
 	p.mu.Unlock()
+	if !invOK && invErr != "" {
+		p.log.Warn("poller: inventory enrich failed", "err", invErr)
+	}
 	p.log.Info("poller: billing poll ok", "buckets", len(buckets), "namespace_bytes", payload.NamespaceBytes)
+}
+
+// fetchInventory best-effort loads bucket + namespace info. Billing stays
+// the source of truth: failures return ok=false and the caller falls back
+// to the previous poll's thresholds, never PollOK=false.
+func (p *Poller) fetchInventory(ctx context.Context) (map[string]ecs.BucketMeta, *ecs.NamespaceMeta, bool, string) {
+	src, ok := p.client.(inventorySource)
+	if !ok {
+		return map[string]ecs.BucketMeta{}, nil, false, ""
+	}
+	metas, berr := src.BucketMetas(ctx, p.namespace)
+	nsmeta, nerr := src.NamespaceMetaInfo(ctx, p.namespace)
+	if berr != nil || nerr != nil {
+		msg := ""
+		if berr != nil {
+			msg += "buckets: " + berr.Error()
+		}
+		if nerr != nil {
+			if msg != "" {
+				msg += "; "
+			}
+			msg += "namespace: " + nerr.Error()
+		}
+		if metas == nil {
+			metas = map[string]ecs.BucketMeta{}
+		}
+		return metas, nsmeta, false, msg
+	}
+	if metas == nil {
+		metas = map[string]ecs.BucketMeta{}
+	}
+	return metas, nsmeta, true, ""
+}
+
+// previousInventory returns the last poll's block/notify thresholds keyed
+// by bucket, for carry-over when a fresh enrich fails.
+func (p *Poller) previousInventory() map[string]ecs.BucketMeta {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[string]ecs.BucketMeta, len(p.snap.Buckets))
+	for _, b := range p.snap.Buckets {
+		m := ecs.BucketMeta{Name: b.Name, Namespace: b.Namespace}
+		if b.BlockSize != nil {
+			m.BlockSize, m.HasBlock = *b.BlockSize, true
+		}
+		if b.NotificationSize != nil {
+			m.NotificationSize, m.HasNotify = *b.NotificationSize, true
+		}
+		out[b.Name] = m
+	}
+	return out
 }
 
 func (p *Poller) previousStreaks() map[string]int {
@@ -277,45 +373,22 @@ func (p *Poller) Snapshot() Snapshot {
 	return cp
 }
 
-// RefreshQuotas re-reads quotas from the store and recomputes the quota,
-// percent and hysteresis fields on the current snapshot without waiting for
-// the next poll, so a quota set/delete is visible immediately.
+// RefreshQuotas re-reads the operator-set namespace total quota from the
+// store and recomputes the namespace percent and hysteresis fields without
+// waiting for the next poll, so a namespace quota set/delete is visible
+// immediately. Bucket quotas are ECS-native (they arrive with each poll),
+// so buckets are untouched here.
 func (p *Poller) RefreshQuotas(ctx context.Context) {
-	quotas, err := p.store.Quotas(ctx, p.namespace)
-	if err != nil {
-		p.log.Warn("poller: refresh quotas lookup failed", "err", err)
-		return
-	}
 	nsQuota, nsqErr := p.store.NamespaceQuota(ctx, p.namespace)
 	if nsqErr != nil {
 		p.log.Warn("poller: refresh namespace quota lookup failed", "err", nsqErr)
+		return
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.snap.PollOK {
 		return // nothing polled yet; next poll will apply quotas
-	}
-	prev := make(map[string]int, len(p.snap.Buckets))
-	for _, b := range p.snap.Buckets {
-		prev[b.Name] = b.OverStreak
-	}
-	for i, b := range p.snap.Buckets {
-		var qp *int64
-		if q, ok := quotas[b.Name]; ok {
-			v := q.QuotaBytes
-			qp = &v
-		}
-		streak, confirmed := quota.Apply(prev[b.Name], qp, b.UsedBytes)
-		p.snap.Buckets[i].QuotaBytes = qp
-		p.snap.Buckets[i].UsedPercent = nil
-		p.snap.Buckets[i].AtQuota = qp != nil && b.UsedBytes >= *qp
-		p.snap.Buckets[i].OverStreak = streak
-		p.snap.Buckets[i].ConfirmedOver = confirmed
-		if qp != nil && *qp > 0 {
-			pct := float64(b.UsedBytes) / float64(*qp) * 100
-			p.snap.Buckets[i].UsedPercent = &pct
-		}
 	}
 
 	// Namespace-level quota refresh.

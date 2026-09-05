@@ -12,13 +12,22 @@ import (
 )
 
 // bucketView is the pre-formatted per-bucket row for templates.
+// Only necessary columns are shown: name, usage, objects, block/notify
+// sizing knobs, quota % and status. MPU is folded into Used (billing
+// already sums total+mpu) and deliberately has no column.
 type bucketView struct {
 	Name          string
 	Used          string
 	UsedBytes     int64
 	Objects       int64
-	MPU           string
-	MPUBytes      int64
+	MPUBytes      int64 // kept for the JSON API; no table column
+	Block         string
+	BlockBytes    int64 // -1 when inventory has not reported it
+	Notify        string
+	NotifyBytes   int64 // -1 when inventory has not reported it
+	HasBlock      bool
+	HasNotify     bool
+	QuotaMode     string // off | notify-only | block-only | block-notify (ECS-native)
 	HasQuota      bool
 	Quota         string
 	QuotaBytes    int64
@@ -28,28 +37,31 @@ type bucketView struct {
 	AtQuota       bool // used >= quota: ECS rejects further writes
 	OverStreak    int
 	ConfirmedOver bool
-	QuotaOnly     bool // quota set but not in last poll
+	NotifyReached bool // used >= ECS notification threshold
 }
 
 type dashboardData struct {
-	BasePath              string
-	Namespace             string
-	Now                   time.Time
-	PolledAt              time.Time
-	PollOK                bool
-	LastError             string
-	NamespaceUsed         string
-	NamespaceUsedBytes    int64
-	NamespaceObjects      int64
-	NamespaceHasQuota     bool
-	NamespaceQuota        string
-	NamespaceQuotaBytes   int64
-	NamespacePercent      string
-	NamespaceBarWidth     int
-	NamespaceAtQuota      bool
+	BasePath               string
+	Namespace              string
+	Now                    time.Time
+	PolledAt               time.Time
+	PollOK                 bool
+	LastError              string
+	InventoryError         string
+	NamespaceUsed          string
+	NamespaceUsedBytes     int64
+	NamespaceObjects       int64
+	NamespaceHasQuota      bool
+	NamespaceQuota         string
+	NamespaceQuotaBytes    int64
+	NamespacePercent       string
+	NamespaceBarWidth      int
+	NamespaceAtQuota       bool
 	NamespaceConfirmedOver bool
-	Buckets               []bucketView
-	Flash                 string
+	NamespaceDefaultBlock  string
+	HasDefaultBlock        bool
+	Buckets                []bucketView
+	Flash                  string
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -88,50 +100,52 @@ func (s *Server) buildDashboard(r *http.Request) dashboardData {
 			data.NamespaceBarWidth = barWidth(snap.NamespaceUsedPercent)
 		}
 	}
-
-	seen := make(map[string]bool, len(snap.Buckets))
-	for _, b := range snap.Buckets {
-		seen[b.Name] = true
-		data.Buckets = append(data.Buckets, toBucketView(b))
+	if snap.NamespaceDefaultBlock != nil {
+		data.HasDefaultBlock = true
+		data.NamespaceDefaultBlock = HumanBytes(*snap.NamespaceDefaultBlock)
 	}
+	data.InventoryError = snap.InventoryError
 
-	// Quotas set for buckets not present in the last poll.
-	if quotas, err := s.deps.Store.Quotas(r.Context(), s.deps.Namespace); err == nil {
-		for name, q := range quotas {
-			if seen[name] {
-				continue
-			}
-			v := bucketView{
-				Name:       name,
-				HasQuota:   true,
-				Quota:      HumanBytes(q.QuotaBytes),
-				QuotaBytes: q.QuotaBytes,
-				QuotaOnly:  true,
-			}
-			data.Buckets = append(data.Buckets, v)
-		}
+	for _, b := range snap.Buckets {
+		data.Buckets = append(data.Buckets, toBucketView(b))
 	}
 	return data
 }
 
 func toBucketView(b poller.BucketState) bucketView {
-	return bucketView{
+	v := bucketView{
 		Name:          b.Name,
 		Used:          HumanBytes(b.UsedBytes),
 		UsedBytes:     b.UsedBytes,
 		Objects:       b.Objects,
-		MPU:           HumanBytes(b.MPUBytes),
 		MPUBytes:      b.MPUBytes,
+		BlockBytes:    -1,
+		NotifyBytes:   -1,
+		Block:         "—",
+		Notify:        "—",
 		Stale:         b.Stale,
 		AtQuota:       b.AtQuota,
 		OverStreak:    b.OverStreak,
 		ConfirmedOver: b.ConfirmedOver,
 		QuotaBytes:    quotaBytesOrZero(b.QuotaBytes),
 		HasQuota:      b.QuotaBytes != nil,
-		Quota:         quotaOrDash(b.QuotaBytes),
+		Quota:         quotaOrUnlimited(b.QuotaBytes),
 		Percent:       percentOrDash(b.UsedPercent),
 		BarWidth:      barWidth(b.UsedPercent),
+		NotifyReached: b.NotificationSize != nil && b.UsedBytes >= *b.NotificationSize,
 	}
+	if b.BlockSize != nil {
+		v.HasBlock = true
+		v.BlockBytes = *b.BlockSize
+		v.Block = HumanBytes(*b.BlockSize)
+	}
+	if b.NotificationSize != nil {
+		v.HasNotify = true
+		v.NotifyBytes = *b.NotificationSize
+		v.Notify = HumanBytes(*b.NotificationSize)
+	}
+	v.QuotaMode = ecs.BucketMeta{HasBlock: v.HasBlock, HasNotify: v.HasNotify}.QuotaMode()
+	return v
 }
 
 func quotaBytesOrZero(q *int64) int64 {
@@ -141,9 +155,11 @@ func quotaBytesOrZero(q *int64) int64 {
 	return *q
 }
 
-func quotaOrDash(q *int64) string {
+// quotaOrUnlimited renders the ECS Block Access threshold; quota-off
+// buckets (no threshold) are unlimited, never a dash.
+func quotaOrUnlimited(q *int64) string {
 	if q == nil {
-		return "—"
+		return "Unlimited"
 	}
 	return HumanBytes(*q)
 }
@@ -221,48 +237,13 @@ func (s *Server) handleQuotaForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bucket-level quota form.
-	bucket := r.Form.Get("bucket")
-	if err := validateBucket(bucket); err != nil {
-		redirect("error: " + err.Error())
-		return
-	}
-
-	if r.Form.Get("action") == "delete" {
-		if err := s.deps.Store.DeleteQuota(r.Context(), s.deps.Namespace, bucket); err != nil {
-			s.deps.Log.Error("form delete quota", "err", err)
-			redirect("error: could not delete quota")
-			return
-		}
-		s.refreshQuotas(r)
-		redirect("quota removed for " + bucket)
-		return
-	}
-
-	q, err := strconv.ParseFloat(r.Form.Get("quota"), 64)
-	if err != nil || q <= 0 {
-		redirect("error: quota must be a positive number")
-		return
-	}
-	unit := r.Form.Get("unit")
-	if unit == "" {
-		unit = "GiB"
-	}
-	bytes, err := ecs.ToBytes(q, unit)
-	if err != nil {
-		redirect("error: " + err.Error())
-		return
-	}
-	if err := s.deps.Store.SetQuota(r.Context(), s.deps.Namespace, bucket, bytes); err != nil {
-		s.deps.Log.Error("form set quota", "err", err)
-		redirect("error: could not save quota")
-		return
-	}
-	s.refreshQuotas(r)
-	redirect("quota set for " + bucket + ": " + HumanBytes(bytes))
+	// Bucket quotas are ECS-native (Block Access thresholds from the bucket
+	// inventory poll) and cannot be set here. Anything that is not the
+	// namespace form is rejected.
+	redirect("error: bucket quotas come from ECS; set them in the ECS UI")
 }
 
-// HumanBytes renders bytes with binary units (GiB, never "GB").
+// HumanBytes renders bytes// HumanBytes renders bytes with binary units (GiB, never "GB").
 func HumanBytes(n int64) string {
 	const unit = 1024
 	if n < unit {

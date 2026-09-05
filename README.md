@@ -5,10 +5,28 @@ wallboard. Phoenix core stays health-only for S3; ECS metering lives here,
 in its own image.
 
 - Go 1.25+, `CGO_ENABLED=0`, stdlib `net/http`, server-rendered templates.
-- Polls `GET /object/billing/namespace/{ns}/info?include_bucket_detail=true&sizeunit=KB`.
+- Polls `GET /object/billing/namespace/{ns}/info?include_bucket_detail=true&sizeunit=KB`
+  (source of truth for usage) plus, best-effort per poll:
+  `GET /object/bucket?namespace={ns}` (per-bucket block_size / notification_size)
+  and `GET /object/namespaces/namespace/{ns}` (default_bucket_block_size).
+  Inventory failures never flip `/health/ready` — usage stays live, the UI
+  notes "Bucket info unavailable" instead.
 - Size units are **binary** (API `GB` means GiB; Dell KB 000273649).
-- Quotas are operator-set in this UI (ECS has no bucket quota field) with
-  2-sample hysteresis before `/health/quota` goes 503.
+- Bucket quotas are ECS-native (Block Access thresholds from the bucket
+  inventory poll) with 2-sample hysteresis before `/health/quota` goes 503.
+  Quota-off buckets show Unlimited. Only the namespace total quota is
+  operator-set here — ECS exposes no namespace quota.
+
+## Dashboard columns (necessary only)
+
+Bucket · Used (already includes incomplete multipart uploads) · Objects ·
+Block · Notify are the ECS-native quota thresholds (UI: "Block Access at"
++ "Send Notification at", in GiB; API in bytes). Modes fall out of the two
+numbers: Off (—/—) · Notification Only (—/X) · Block Only (X/—) ·
+Block + Notify (X/Y); the dashboard labels the mode under the bucket name.
+A 0/missing threshold means unset (quota off → Unlimited). The % bar and
+/health/quota alert on the Block Access threshold; the Notify threshold
+raises a yellow "notify threshold" warning.
 
 ## Local run (SQLite, no MariaDB needed)
 
@@ -163,7 +181,10 @@ is `golang:1.25-alpine` (Go ≥ 1.25 is required by CGO-free
 ## Fixtures
 
 `internal/ecs/testdata/namespace_info.{json,xml}` are synthetic, redacted
-fixtures matching the documented field set. If you capture real payloads
+fixtures matching the documented field set. `bucket_list.json` and
+`namespace_meta.json` are the same for the inventory endpoints (subset of
+EMCECS/python-ecsclient `BUCKET` / `NAMESPACE` schemas: block_size,
+notification_size, default_bucket_block_size). If you capture real payloads
 from the lab, redact names if needed but keep the field set, and replace
 these files.
 

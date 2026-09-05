@@ -8,9 +8,8 @@ import (
 
 // Mem is an in-memory Store used by tests. Not for production use.
 type Mem struct {
-	mu     sync.Mutex
-	states map[string]StateRow
-	quotas map[string]QuotaRow
+	mu      sync.Mutex
+	states  map[string]StateRow
 	nsQuota *NamespaceQuotaRow
 }
 
@@ -18,7 +17,6 @@ type Mem struct {
 func NewMem() *Mem {
 	return &Mem{
 		states: map[string]StateRow{},
-		quotas: map[string]QuotaRow{},
 	}
 }
 
@@ -39,35 +37,6 @@ func (m *Mem) States(_ context.Context) ([]StateRow, error) {
 	out := make([]StateRow, 0, len(m.states))
 	for _, r := range m.states {
 		out = append(out, r)
-	}
-	return out, nil
-}
-
-func (m *Mem) SetQuota(_ context.Context, namespace, bucket string, quotaBytes int64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.quotas[key(namespace, bucket)] = QuotaRow{
-		Namespace: namespace, Bucket: bucket, QuotaBytes: quotaBytes,
-		UpdatedAt: time.Now().UTC(),
-	}
-	return nil
-}
-
-func (m *Mem) DeleteQuota(_ context.Context, namespace, bucket string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.quotas, key(namespace, bucket))
-	return nil
-}
-
-func (m *Mem) Quotas(_ context.Context, namespace string) (map[string]QuotaRow, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := map[string]QuotaRow{}
-	for _, q := range m.quotas {
-		if q.Namespace == namespace {
-			out[q.Bucket] = q
-		}
 	}
 	return out, nil
 }
