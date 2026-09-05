@@ -60,6 +60,10 @@ type dashboardData struct {
 	NamespaceConfirmedOver bool
 	NamespaceDefaultBlock  string
 	HasDefaultBlock        bool
+	NamespaceBlock         string
+	HasNamespaceBlock      bool
+	NamespaceNotify        string
+	HasNamespaceNotify     bool
 	Buckets                []bucketView
 	Flash                  string
 }
@@ -103,6 +107,14 @@ func (s *Server) buildDashboard(r *http.Request) dashboardData {
 	if snap.NamespaceDefaultBlock != nil {
 		data.HasDefaultBlock = true
 		data.NamespaceDefaultBlock = HumanBytes(*snap.NamespaceDefaultBlock)
+	}
+	if snap.NamespaceBlockSize != nil {
+		data.HasNamespaceBlock = true
+		data.NamespaceBlock = HumanBytes(*snap.NamespaceBlockSize)
+	}
+	if snap.NamespaceNotificationSize != nil {
+		data.HasNamespaceNotify = true
+		data.NamespaceNotify = HumanBytes(*snap.NamespaceNotificationSize)
 	}
 	data.InventoryError = snap.InventoryError
 

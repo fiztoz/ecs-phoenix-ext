@@ -61,6 +61,11 @@ type Snapshot struct {
 	// NamespaceDefaultBlock is the ECS default_bucket_block_size from
 	// GET /object/namespaces/namespace/{ns}; nil until inventory succeeds.
 	NamespaceDefaultBlock *int64
+	// NamespaceBlockSize/NamespaceNotificationSize are the namespace-level
+	// blockSize/notificationSize thresholds when ECS reports them
+	// (positive only); nil when unset or until inventory succeeds.
+	NamespaceBlockSize        *int64
+	NamespaceNotificationSize *int64
 	// InventoryOK reports whether the last bucket/namespace info enrich
 	// succeeded. Billing is the source of truth: a failed inventory never
 	// flips PollOK, it only sets InventoryError.
@@ -268,26 +273,40 @@ func (p *Poller) pollOnce(ctx context.Context) {
 
 	p.mu.Lock()
 	prevNSBlock := p.snap.NamespaceDefaultBlock
-	if nsmeta != nil && nsmeta.HasDefaultBucketBlock {
-		v := nsmeta.DefaultBucketBlock
-		prevNSBlock = &v
+	prevNSBSize := p.snap.NamespaceBlockSize
+	prevNSNotify := p.snap.NamespaceNotificationSize
+	if nsmeta != nil {
+		if nsmeta.HasDefaultBucketBlock {
+			v := nsmeta.DefaultBucketBlock
+			prevNSBlock = &v
+		}
+		if nsmeta.HasBlock {
+			v := nsmeta.BlockSize
+			prevNSBSize = &v
+		}
+		if nsmeta.HasNotify {
+			v := nsmeta.NotificationSize
+			prevNSNotify = &v
+		}
 	}
 	p.snap = Snapshot{
-		Namespace:              p.namespace,
-		PolledAt:               now,
-		PollOK:                 true,
-		LastError:              "",
-		NamespaceBytes:         payload.NamespaceBytes,
-		NamespaceObjects:       payload.NamespaceObjects,
-		NamespaceQuotaBytes:    nsQuotaBytes,
-		NamespaceUsedPercent:   nsPct,
-		NamespaceAtQuota:       nsAtQuota,
-		NamespaceOverStreak:    nsStreak,
-		NamespaceConfirmedOver: nsConfirmed,
-		NamespaceDefaultBlock:  prevNSBlock,
-		InventoryOK:            invOK,
-		InventoryError:         invErr,
-		Buckets:                buckets,
+		Namespace:                 p.namespace,
+		PolledAt:                  now,
+		PollOK:                    true,
+		LastError:                 "",
+		NamespaceBytes:            payload.NamespaceBytes,
+		NamespaceObjects:          payload.NamespaceObjects,
+		NamespaceQuotaBytes:       nsQuotaBytes,
+		NamespaceUsedPercent:      nsPct,
+		NamespaceAtQuota:          nsAtQuota,
+		NamespaceOverStreak:       nsStreak,
+		NamespaceConfirmedOver:    nsConfirmed,
+		NamespaceDefaultBlock:     prevNSBlock,
+		NamespaceBlockSize:        prevNSBSize,
+		NamespaceNotificationSize: prevNSNotify,
+		InventoryOK:               invOK,
+		InventoryError:            invErr,
+		Buckets:                   buckets,
 	}
 	p.mu.Unlock()
 	if !invOK && invErr != "" {

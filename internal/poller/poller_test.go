@@ -432,3 +432,38 @@ func TestInventoryFailureKeepsBilling(t *testing.T) {
 		t.Fatalf("inventory error must be recorded: %+v", snap)
 	}
 }
+
+func TestInventoryNamespaceThresholds(t *testing.T) {
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	src := &fullSource{
+		fakeSource: fakeSource{results: []pollResult{{payload: payload(100, 0, now)}}},
+		metas:      map[string]ecs.BucketMeta{},
+		nsmeta: &ecs.NamespaceMeta{
+			Name:                  "prod-ns",
+			DefaultBucketBlock:    134217728,
+			HasDefaultBucketBlock: true,
+			BlockSize:             10737418240,
+			HasBlock:              true,
+			NotificationSize:      8589934592,
+			HasNotify:             true,
+		},
+	}
+	mem := store.NewMem()
+	p := New(context.Background(), src, mem, "prod-ns", 15*time.Minute, quietLog())
+	p.now = func() time.Time { return now }
+	p.PollOnce(context.Background())
+
+	snap := p.Snapshot()
+	if !snap.InventoryOK {
+		t.Fatalf("inventory should succeed: %+v", snap)
+	}
+	if snap.NamespaceDefaultBlock == nil || *snap.NamespaceDefaultBlock != 134217728 {
+		t.Fatalf("namespace default block missing: %+v", snap)
+	}
+	if snap.NamespaceBlockSize == nil || *snap.NamespaceBlockSize != 10737418240 {
+		t.Fatalf("namespace block missing: %+v", snap)
+	}
+	if snap.NamespaceNotificationSize == nil || *snap.NamespaceNotificationSize != 8589934592 {
+		t.Fatalf("namespace notify missing: %+v", snap)
+	}
+}

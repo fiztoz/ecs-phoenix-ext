@@ -199,6 +199,12 @@
     {{if .HasDefaultBlock}}
     <div><div class="k">Default block</div><div class="v tnum">{{.NamespaceDefaultBlock}}</div></div>
     {{end}}
+    {{if .HasNamespaceBlock}}
+    <div><div class="k">Block</div><div class="v tnum">{{.NamespaceBlock}}</div></div>
+    {{end}}
+    {{if .HasNamespaceNotify}}
+    <div><div class="k">Notify</div><div class="v tnum">{{.NamespaceNotify}}</div></div>
+    {{end}}
     <div><div class="k">Objects</div><div class="v tnum">{{.NamespaceObjects}}</div></div>
     <div><div class="k">Last poll</div><div class="v" style="font-size:0.9375rem">{{if .PolledAt.IsZero}}—{{else}}{{.PolledAt.UTC.Format "2006-01-02 15:04 UTC"}} ({{age .PolledAt .Now}} ago){{end}}</div></div>
   </div>

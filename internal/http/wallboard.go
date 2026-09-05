@@ -26,6 +26,10 @@ type wallboardData struct {
 	NamespaceConfirmedOver bool
 	NamespaceDefaultBlock  string
 	HasDefaultBlock        bool
+	NamespaceBlock         string
+	HasNamespaceBlock      bool
+	NamespaceNotify        string
+	HasNamespaceNotify     bool
 	Buckets                []bucketView
 }
 
@@ -59,6 +63,14 @@ func (s *Server) handleWallboard(w http.ResponseWriter, r *http.Request) {
 	if snap.NamespaceDefaultBlock != nil {
 		data.HasDefaultBlock = true
 		data.NamespaceDefaultBlock = HumanBytes(*snap.NamespaceDefaultBlock)
+	}
+	if snap.NamespaceBlockSize != nil {
+		data.HasNamespaceBlock = true
+		data.NamespaceBlock = HumanBytes(*snap.NamespaceBlockSize)
+	}
+	if snap.NamespaceNotificationSize != nil {
+		data.HasNamespaceNotify = true
+		data.NamespaceNotify = HumanBytes(*snap.NamespaceNotificationSize)
 	}
 
 	for _, b := range snap.Buckets {

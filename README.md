@@ -184,9 +184,12 @@ is `golang:1.25-alpine` (Go ≥ 1.25 is required by CGO-free
 fixtures matching the documented field set. `bucket_list.json` and
 `namespace_meta.json` are the same for the inventory endpoints (subset of
 EMCECS/python-ecsclient `BUCKET` / `NAMESPACE` schemas: block_size,
-notification_size, default_bucket_block_size). If you capture real payloads
-from the lab, redact names if needed but keep the field set, and replace
-these files.
+notification_size, default_bucket_block_size, plus namespace-level
+blockSize/notificationSize). Real ECS answers are XML rooted at
+`<object_buckets>` / `<namespace>` with `-1` meaning unset, extra elements
+(softquota, retention, search metadata, links) ignored. If you capture real
+payloads from the lab, redact names if needed but keep the field set, and
+replace these files.
 
 ## Nice to have (not planned yet)
 

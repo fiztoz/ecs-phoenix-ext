@@ -159,3 +159,126 @@ func TestQuotaModeVariations(t *testing.T) {
 		t.Errorf("both block = %d, want 10737418240 (10 GiB UI value in bytes)", got)
 	}
 }
+
+func TestPluralObjectBucketsEnvelopeJSON(t *testing.T) {
+	body := `{"object_buckets": [{"name": "b1", "namespace": "ns", "block_size": 1024}], "Filter": "x"}`
+	metas, _, err := ParseBucketList([]byte(body), "application/json")
+	if err != nil {
+		t.Fatalf("ParseBucketList: %v", err)
+	}
+	if len(metas) != 1 || metas[0].Name != "b1" || !metas[0].HasBlock {
+		t.Fatalf("plural envelope not parsed: %+v", metas)
+	}
+}
+
+// TestRealBucketListXMLShape mirrors the exact ECS response shape: root
+// <object_buckets>, Filter with an escaped ampersand, extra elements
+// (softquota, retention, search metadata, link) and -1 unset sentinels.
+func TestRealBucketListXMLShape(t *testing.T) {
+	body := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<object_buckets>
+    <Filter>namespace=ns1&amp;name=*</Filter>
+    <object_bucket>
+        <api_type>S3</api_type>
+        <block_size>-1</block_size>
+        <owner>s3test</owner>
+        <created>2020-03-05T17:03:46.608Z</created>
+        <id>ns1.bucket1</id>
+        <link rel="self" href="/object/bucket/ns1.bucket1"/>
+        <locked>false</locked>
+        <search_metadata><isEnabled>false</isEnabled><maxKeys>0</maxKeys></search_metadata>
+        <name>bucket1</name>
+        <namespace>ns1</namespace>
+        <notification_size>-1</notification_size>
+        <vpool>urn:storageos:ReplicationGroupInfo:61983759:global</vpool>
+        <retention>0</retention>
+        <softquota>-1</softquota>
+        <TagSet/>
+    </object_bucket>
+    <object_bucket>
+        <api_type>CAS</api_type>
+        <block_size>-1</block_size>
+        <owner>casprofile1</owner>
+        <created>2019-03-25T16:26:16.897Z</created>
+        <search_metadata><isEnabled>true</isEnabled><maxKeys>0</maxKeys>
+            <metadata><datatype>datetime</datatype><name>CreateTime</name><type>System</type></metadata>
+        </search_metadata>
+        <name>casbucket1</name>
+        <namespace>ns1</namespace>
+        <notification_size>-1</notification_size>
+        <vpool>urn:storageos:ReplicationGroupInfo:61983759:global</vpool>
+        <retention>0</retention>
+        <softquota>-1</softquota>
+    </object_bucket>
+</object_buckets>`
+	metas, next, err := ParseBucketList([]byte(body), "application/xml")
+	if err != nil {
+		t.Fatalf("ParseBucketList: %v", err)
+	}
+	if next != "" {
+		t.Fatalf("next = %q, want empty", next)
+	}
+	if len(metas) != 2 {
+		t.Fatalf("metas = %d, want 2", len(metas))
+	}
+	// -1 sentinel means quota off / unlimited, but identity still parses.
+	for _, m := range metas {
+		if m.QuotaMode() != "off" || m.HasBlock || m.HasNotify {
+			t.Errorf("%s = %+v, want mode off with no sizes", m.Name, m)
+		}
+	}
+	if metas[0].Owner != "s3test" || metas[0].APIType != "S3" {
+		t.Errorf("identity not parsed: %+v", metas[0])
+	}
+	if metas[1].APIType != "CAS" {
+		t.Errorf("CAS row not parsed: %+v", metas[1])
+	}
+}
+
+// TestRealNamespaceXMLShape mirrors the exact ECS namespace response:
+// -1 sentinels everywhere plus camelCase blockSize/notificationSize.
+func TestRealNamespaceXMLShape(t *testing.T) {
+	body := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<namespace>
+    <creation_time>1553479125783</creation_time>
+    <id>ns1</id>
+    <inactive>false</inactive>
+    <link rel="self" href="/object/namespaces/namespace/ns1"/>
+    <name>ns1</name>
+    <default_bucket_block_size>-1</default_bucket_block_size>
+    <blockSize>-1</blockSize>
+    <is_compliance_enabled>false</is_compliance_enabled>
+    <is_encryption_enabled>false</is_encryption_enabled>
+    <is_stale_allowed>false</is_stale_allowed>
+    <notificationSize>-1</notificationSize>
+    <default_data_services_vpool>urn:storageos:ReplicationGroupInfo:61983759:global</default_data_services_vpool>
+</namespace>`
+	m, err := ParseNamespaceMeta([]byte(body), "application/xml")
+	if err != nil {
+		t.Fatalf("ParseNamespaceMeta: %v", err)
+	}
+	if m.Name != "ns1" || m.ID != "ns1" {
+		t.Fatalf("identity = %+v, want ns1", m)
+	}
+	if m.HasDefaultBucketBlock || m.HasBlock || m.HasNotify {
+		t.Fatalf("all -1 must be unset: %+v", m)
+	}
+
+	// Positive camelCase namespace thresholds are captured.
+	body2 := `<namespace><name>ns1</name><id>ns1</id>` +
+		`<default_bucket_block_size>-1</default_bucket_block_size>` +
+		`<blockSize>10737418240</blockSize><notificationSize>8589934592</notificationSize></namespace>`
+	m2, err := ParseNamespaceMeta([]byte(body2), "application/xml")
+	if err != nil {
+		t.Fatalf("ParseNamespaceMeta: %v", err)
+	}
+	if !m2.HasBlock || m2.BlockSize != 10737418240 {
+		t.Errorf("namespace block not captured: %+v", m2)
+	}
+	if !m2.HasNotify || m2.NotificationSize != 8589934592 {
+		t.Errorf("namespace notify not captured: %+v", m2)
+	}
+	if m2.HasDefaultBucketBlock {
+		t.Errorf("default -1 must stay unset: %+v", m2)
+	}
+}

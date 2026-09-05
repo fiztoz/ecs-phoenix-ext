@@ -238,6 +238,18 @@
       <div class="v tnum">{{.NamespaceDefaultBlock}}</div>
     </div>
     {{end}}
+    {{if .HasNamespaceBlock}}
+    <div class="stat">
+      <div class="k">Block</div>
+      <div class="v tnum">{{.NamespaceBlock}}</div>
+    </div>
+    {{end}}
+    {{if .HasNamespaceNotify}}
+    <div class="stat">
+      <div class="k">Notify</div>
+      <div class="v tnum">{{.NamespaceNotify}}</div>
+    </div>
+    {{end}}
     <div class="stat">
       <div class="k">Objects</div>
       <div class="v tnum">{{.NamespaceObjects}}</div>

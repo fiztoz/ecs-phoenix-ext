@@ -304,41 +304,45 @@ type apiBucket struct {
 }
 
 type apiResponse struct {
-	Namespace              string      `json:"namespace"`
-	PolledAt               time.Time   `json:"polled_at"`
-	PollOK                 bool        `json:"poll_ok"`
-	LastError              string      `json:"last_error"`
-	InventoryOK            bool        `json:"inventory_ok"`
-	InventoryError         string      `json:"inventory_error"`
-	NamespaceUsedBytes     int64       `json:"namespace_used_bytes"`
-	NamespaceObjects       int64       `json:"namespace_objects"`
-	NamespaceQuotaBytes    *int64      `json:"namespace_quota_bytes"`
-	NamespaceUsedPercent   *float64    `json:"namespace_used_percent"`
-	NamespaceDefaultBlock  *int64      `json:"namespace_default_block_size"`
-	NamespaceAtQuota       bool        `json:"namespace_at_quota"`
-	NamespaceConfirmedOver bool        `json:"namespace_confirmed_over"`
-	StaleAfterSeconds      int64       `json:"stale_after_seconds"`
-	Buckets                []apiBucket `json:"buckets"`
+	Namespace                 string      `json:"namespace"`
+	PolledAt                  time.Time   `json:"polled_at"`
+	PollOK                    bool        `json:"poll_ok"`
+	LastError                 string      `json:"last_error"`
+	InventoryOK               bool        `json:"inventory_ok"`
+	InventoryError            string      `json:"inventory_error"`
+	NamespaceUsedBytes        int64       `json:"namespace_used_bytes"`
+	NamespaceObjects          int64       `json:"namespace_objects"`
+	NamespaceQuotaBytes       *int64      `json:"namespace_quota_bytes"`
+	NamespaceUsedPercent      *float64    `json:"namespace_used_percent"`
+	NamespaceDefaultBlock     *int64      `json:"namespace_default_block_size"`
+	NamespaceBlockSize        *int64      `json:"namespace_block_size"`
+	NamespaceNotificationSize *int64      `json:"namespace_notification_size"`
+	NamespaceAtQuota          bool        `json:"namespace_at_quota"`
+	NamespaceConfirmedOver    bool        `json:"namespace_confirmed_over"`
+	StaleAfterSeconds         int64       `json:"stale_after_seconds"`
+	Buckets                   []apiBucket `json:"buckets"`
 }
 
 func (s *Server) handleAPIBuckets(w http.ResponseWriter, _ *http.Request) {
 	snap := s.deps.Snapshots.Snapshot()
 	resp := apiResponse{
-		Namespace:              snap.Namespace,
-		PolledAt:               snap.PolledAt.UTC(),
-		PollOK:                 snap.PollOK,
-		LastError:              snap.LastError,
-		InventoryOK:            snap.InventoryOK,
-		InventoryError:         snap.InventoryError,
-		NamespaceUsedBytes:     snap.NamespaceBytes,
-		NamespaceObjects:       snap.NamespaceObjects,
-		NamespaceQuotaBytes:    snap.NamespaceQuotaBytes,
-		NamespaceUsedPercent:   snap.NamespaceUsedPercent,
-		NamespaceDefaultBlock:  snap.NamespaceDefaultBlock,
-		NamespaceAtQuota:       snap.NamespaceAtQuota,
-		NamespaceConfirmedOver: snap.NamespaceConfirmedOver,
-		StaleAfterSeconds:      int64(s.deps.Snapshots.StaleThreshold().Seconds()),
-		Buckets:                make([]apiBucket, 0, len(snap.Buckets)),
+		Namespace:                 snap.Namespace,
+		PolledAt:                  snap.PolledAt.UTC(),
+		PollOK:                    snap.PollOK,
+		LastError:                 snap.LastError,
+		InventoryOK:               snap.InventoryOK,
+		InventoryError:            snap.InventoryError,
+		NamespaceUsedBytes:        snap.NamespaceBytes,
+		NamespaceObjects:          snap.NamespaceObjects,
+		NamespaceQuotaBytes:       snap.NamespaceQuotaBytes,
+		NamespaceUsedPercent:      snap.NamespaceUsedPercent,
+		NamespaceDefaultBlock:     snap.NamespaceDefaultBlock,
+		NamespaceBlockSize:        snap.NamespaceBlockSize,
+		NamespaceNotificationSize: snap.NamespaceNotificationSize,
+		NamespaceAtQuota:          snap.NamespaceAtQuota,
+		NamespaceConfirmedOver:    snap.NamespaceConfirmedOver,
+		StaleAfterSeconds:         int64(s.deps.Snapshots.StaleThreshold().Seconds()),
+		Buckets:                   make([]apiBucket, 0, len(snap.Buckets)),
 	}
 	for _, b := range snap.Buckets {
 		ab := apiBucket{

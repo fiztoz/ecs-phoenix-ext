@@ -13,13 +13,14 @@ import (
 )
 
 // Inventory types are the *necessary* subset of the Dell ECS management API,
-// not the full object dump. Field names follow EMCECS/python-ecsclient
-// schemas.py (BUCKET / NAMESPACE): bucket rows carry block_size and
-// notification_size, namespace rows carry default_bucket_block_size.
+// not the full object dump. Bucket rows carry block_size and
+// notification_size; namespace rows carry default_bucket_block_size plus
+// namespace-level blockSize/notificationSize. Real ECS answers are XML with
+// root <object_buckets> (rows in <object_bucket>) and <namespace>; an unset
+// threshold is "-1" (also treated as unset: 0/missing/null).
 //
-// Sizes are byte counts (ECS returns block sizes in bytes, e.g. 134217728
-// for 128 MiB). If lab traffic ever shows small values that are clearly MB,
-// fix the multiplier in exactly one place: the parse helpers below.
+// Sizes are byte counts. If lab traffic ever shows small values that are
+// clearly MB, fix the multiplier in exactly one place: the parse helpers below.
 
 // BucketMeta is the necessary per-bucket inventory: the ECS-native quota
 // thresholds (see the ECS UI Quota panel: "Block Access at" + "Send
@@ -61,13 +62,18 @@ func (b BucketMeta) QuotaMode() string {
 	}
 }
 
-// NamespaceMeta is the necessary namespace inventory: identity plus the
-// default block size new buckets inherit.
+// NamespaceMeta is the necessary namespace inventory: identity, the
+// default block size new buckets inherit, and the namespace-level block /
+// notify thresholds when ECS reports them (positive only; "-1" means unset).
 type NamespaceMeta struct {
 	Name                  string
 	ID                    string
 	DefaultBucketBlock    int64 // bytes
 	HasDefaultBucketBlock bool
+	BlockSize             int64 // namespace-level blockSize, bytes
+	HasBlock              bool
+	NotificationSize      int64 // namespace-level notificationSize, bytes
+	HasNotify             bool
 }
 
 const maxInventoryPages = 100
@@ -208,7 +214,7 @@ func parseBucketListJSON(body []byte) ([]BucketMeta, string, error) {
 	}
 	// Envelope may also be a bare array (defensive).
 	var raws []json.RawMessage
-	for _, k := range []string{"object_bucket", "buckets", "bucket", "data", "items"} {
+	for _, k := range []string{"object_buckets", "object_bucket", "buckets", "bucket", "data", "items"} {
 		if v, ok := env[k]; ok {
 			if err := json.Unmarshal(v, &raws); err == nil {
 				break
@@ -339,6 +345,12 @@ func ParseNamespaceMeta(body []byte, contentType string) (*NamespaceMeta, error)
 	if v, ok := numField(m, "default_bucket_block_size", "defaultBucketBlockSize"); ok && v > 0 {
 		out.DefaultBucketBlock, out.HasDefaultBucketBlock = v, true
 	}
+	if v, ok := numField(m, "block_size", "blockSize"); ok && v > 0 {
+		out.BlockSize, out.HasBlock = v, true
+	}
+	if v, ok := numField(m, "notification_size", "notificationSize"); ok && v > 0 {
+		out.NotificationSize, out.HasNotify = v, true
+	}
 	if out.Name == "" {
 		return nil, fmt.Errorf("ecs: namespace info missing name")
 	}
@@ -368,6 +380,12 @@ type xmlNamespaceMeta struct {
 	Name         string   `xml:"name"`
 	ID           string   `xml:"id"`
 	DefaultBlock string   `xml:"default_bucket_block_size"`
+	// Real ECS also reports namespace-level thresholds in camelCase;
+	// snake_case variants are accepted defensively.
+	BlockSize        string `xml:"blockSize"`
+	BlockSizeSnake   string `xml:"block_size"`
+	NotificationSize string `xml:"notificationSize"`
+	NotifySizeSnake  string `xml:"notification_size"`
 }
 
 func parseBucketListXML(body []byte) ([]BucketMeta, string, error) {
@@ -403,6 +421,24 @@ func parseNamespaceMetaXML(body []byte) (*NamespaceMeta, error) {
 	if s := strings.TrimSpace(n.DefaultBlock); s != "" {
 		if v, err := parseFloat(s); err == nil && v > 0 {
 			out.DefaultBucketBlock, out.HasDefaultBucketBlock = int64(v), true
+		}
+	}
+	for _, s := range []string{strings.TrimSpace(n.BlockSize), strings.TrimSpace(n.BlockSizeSnake)} {
+		if s == "" {
+			continue
+		}
+		if v, err := parseFloat(s); err == nil && v > 0 {
+			out.BlockSize, out.HasBlock = int64(v), true
+			break
+		}
+	}
+	for _, s := range []string{strings.TrimSpace(n.NotificationSize), strings.TrimSpace(n.NotifySizeSnake)} {
+		if s == "" {
+			continue
+		}
+		if v, err := parseFloat(s); err == nil && v > 0 {
+			out.NotificationSize, out.HasNotify = int64(v), true
+			break
 		}
 	}
 	if out.Name == "" {

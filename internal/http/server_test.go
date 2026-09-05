@@ -476,9 +476,12 @@ func TestBasePathPrefix(t *testing.T) {
 
 func TestAPIBucketsIncludesInventory(t *testing.T) {
 	block, notify, nsblock := int64(134217728), int64(1073741824), int64(134217728)
+	nsBSize, nsNotify := int64(10737418240), int64(8589934592)
 	snap := goodSnapshot()
 	snap.InventoryOK = true
 	snap.NamespaceDefaultBlock = &nsblock
+	snap.NamespaceBlockSize = &nsBSize
+	snap.NamespaceNotificationSize = &nsNotify
 	snap.Buckets[0].BlockSize = &block
 	snap.Buckets[0].NotificationSize = &notify
 	s := newTestServer(t, snap, store.NewMem(), "")
@@ -491,7 +494,7 @@ func TestAPIBucketsIncludesInventory(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"inventory_ok", "inventory_error", "namespace_default_block_size"} {
+	for _, key := range []string{"inventory_ok", "inventory_error", "namespace_default_block_size", "namespace_block_size", "namespace_notification_size"} {
 		if _, ok := body[key]; !ok {
 			t.Errorf("missing key %q", key)
 		}
@@ -591,5 +594,22 @@ func TestDashboardUnlimitedQuotaOff(t *testing.T) {
 	wb := rr2.Body.String()
 	if !strings.Contains(wb, "unlimited quota") || !strings.Contains(wb, "Unlimited") {
 		t.Error("wallboard must label quota-off buckets unlimited")
+	}
+}
+
+func TestDashboardNamespaceThresholds(t *testing.T) {
+	nsBSize, nsNotify := int64(10737418240), int64(8589934592)
+	snap := goodSnapshot()
+	snap.NamespaceBlockSize = &nsBSize
+	snap.NamespaceNotificationSize = &nsNotify
+	s := newTestServer(t, snap, store.NewMem(), "")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rr.Body.String()
+	// 10 GiB block / 8 GiB notify chips appear only because ECS set them.
+	for _, want := range []string{"10.00 GiB", "8.00 GiB"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard missing namespace threshold %q", want)
+		}
 	}
 }
