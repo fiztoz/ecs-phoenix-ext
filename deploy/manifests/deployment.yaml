@@ -24,7 +24,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: ecs-phoenix-ext
-          image: ghcr.io/fiztoz/ecs-phoenix-ext:0.1.0
+          image: ghcr.io/fiztoz/ecs-phoenix-ext:0.2.2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
@@ -73,9 +73,12 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 30
+          # Serving readiness, not ECS dependency health. /health/ready stays
+          # available for Phoenix monitors, but using it here removes the pod
+          # from Service endpoints while cached diagnostics are still useful.
           readinessProbe:
             httpGet:
-              path: /storage/health/ready
+              path: /storage/health/live
               port: http
             initialDelaySeconds: 10
             periodSeconds: 60

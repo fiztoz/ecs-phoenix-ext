@@ -36,8 +36,10 @@ type BucketState struct {
 	MPUBytes         int64
 	QuotaBytes       *int64 // nil when no quota is set
 	UsedPercent      *float64
-	BlockSize        *int64 // nil when inventory has not reported it yet
-	NotificationSize *int64 // nil when inventory has not reported it yet
+	BlockSize        *int64 // nil when unset or not yet reported
+	BlockKnown       bool   // false until inventory (or a restored observation) reports the field
+	NotificationSize *int64 // nil when unset or not yet reported
+	NotifyKnown      bool
 	UptodateTill     time.Time
 	Stale            bool
 	AtQuota          bool // used >= quota: ECS rejects further writes
@@ -61,11 +63,15 @@ type Snapshot struct {
 	// NamespaceDefaultBlock is the ECS default_bucket_block_size from
 	// GET /object/namespaces/namespace/{ns}; nil until inventory succeeds.
 	NamespaceDefaultBlock *int64
+	NamespaceDefaultKnown bool
 	// NamespaceBlockSize/NamespaceNotificationSize are the namespace-level
 	// blockSize/notificationSize thresholds when ECS reports them
-	// (positive only); nil when unset or until inventory succeeds.
+	// (positive only); nil when unset. The Known flags distinguish that
+	// explicit quota-off from inventory that has not reported the field.
 	NamespaceBlockSize        *int64
+	NamespaceBlockKnown       bool
 	NamespaceNotificationSize *int64
+	NamespaceNotifyKnown      bool
 	// InventoryOK reports whether the last bucket/namespace info enrich
 	// succeeded. Billing is the source of truth: a failed inventory never
 	// flips PollOK, it only sets InventoryError.
@@ -101,21 +107,37 @@ func New(ctx context.Context, client BillingSource, st store.Store, namespace st
 		now:       time.Now,
 		snap:      Snapshot{Namespace: namespace, PollOK: false},
 	}
-	if rows, err := st.States(ctx); err == nil {
-		p.seedFromState(rows)
-	} else {
-		log.Warn("poller: could not seed state from store", "err", err)
+	rows, err := st.States(ctx)
+	if err != nil {
+		log.Warn("poller: could not seed bucket state from store", "err", err)
 	}
+	ns, err := st.NamespaceStates(ctx)
+	if err != nil {
+		log.Warn("poller: could not seed namespace state from store", "err", err)
+	}
+	p.seedFromState(rows, ns)
 	return p
 }
 
-func (p *Poller) seedFromState(rows []store.StateRow) {
+func applySeededLimit(dst **int64, known *bool, src store.ObservedLimit) {
+	*known = src.Known
+	if !src.Known || src.Bytes == nil {
+		*dst = nil
+		return
+	}
+	v := *src.Bytes
+	*dst = &v
+}
+
+func (p *Poller) seedFromState(rows []store.StateRow, ns []store.NamespaceState) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	restored := false
 	for _, r := range rows {
 		if r.Namespace != p.namespace {
 			continue
 		}
+		restored = true
 		b := BucketState{
 			Name:          r.Bucket,
 			Namespace:     r.Namespace,
@@ -129,9 +151,35 @@ func (p *Poller) seedFromState(rows []store.StateRow) {
 		if r.UptodateTill != nil {
 			b.UptodateTill = *r.UptodateTill
 		}
+		applySeededLimit(&b.BlockSize, &b.BlockKnown, r.Block)
+		if b.BlockKnown && b.BlockSize != nil {
+			v := *b.BlockSize
+			b.QuotaBytes = &v
+		}
+		applySeededLimit(&b.NotificationSize, &b.NotifyKnown, r.Notify)
 		p.snap.Buckets = append(p.snap.Buckets, b)
 	}
-	if len(p.snap.Buckets) > 0 {
+	for _, n := range ns {
+		if n.Namespace != p.namespace {
+			continue
+		}
+		restored = true
+		p.snap.NamespaceBytes = n.UsedBytes
+		p.snap.NamespaceObjects = n.Objects
+		p.snap.NamespaceOverStreak = n.OverStreak
+		p.snap.NamespaceConfirmedOver = n.ConfirmedOver
+		applySeededLimit(&p.snap.NamespaceDefaultBlock, &p.snap.NamespaceDefaultKnown, n.DefaultBlock)
+		applySeededLimit(&p.snap.NamespaceBlockSize, &p.snap.NamespaceBlockKnown, n.Block)
+		applySeededLimit(&p.snap.NamespaceNotificationSize, &p.snap.NamespaceNotifyKnown, n.Notify)
+		if n.Block.Known && n.Block.Bytes != nil {
+			v := *n.Block.Bytes
+			p.snap.NamespaceQuotaBytes = &v
+			pct := float64(n.UsedBytes) / float64(v) * 100
+			p.snap.NamespaceUsedPercent = &pct
+			p.snap.NamespaceAtQuota = n.UsedBytes >= v
+		}
+	}
+	if restored {
 		p.snap.LastError = "restored last observation; no poll has succeeded since start"
 	}
 }
@@ -176,64 +224,60 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		return
 	}
 
-	prev := p.previousStreaks()
+	prev, nsPrevStreak, nsPrevConfirmed, prevDefault, prevBlock, prevNotify := p.carried()
 	th := p.StaleThreshold()
 
-	// Bucket quotas are ECS-native (Block Access thresholds from the bucket
-	// inventory poll), never operator-set. A failed inventory keeps billing
-	// live; thresholds fall back to the previous poll so hysteresis
-	// survives a transient enrich failure.
-	metas, nsmeta, invOK, invErr := p.fetchInventory(ctx)
-	if !invOK {
-		for name, pm := range p.previousInventory() {
-			if _, ok := metas[name]; !ok {
-				metas[name] = pm
-			}
-		}
-	}
+	// Bucket and namespace quotas are ECS-native. Each inventory endpoint is
+	// independent: a successful response is authoritative, including unset
+	// fields (explicit quota-off). Fallback applies only to the endpoint that
+	// failed, and an unknown threshold is not treated as unlimited.
+	metas, bucketsOK, nsmeta, nsOK, invErr := p.fetchInventory(ctx)
+	invOK := bucketsOK && nsOK
 
-	rows := make([]store.StateRow, 0, len(payload.Buckets))
 	buckets := make([]BucketState, 0, len(payload.Buckets))
 	for _, b := range payload.Buckets {
-		// ECS Block Access threshold is the quota; quota-off buckets
-		// (no block threshold) have no quota: unlimited.
 		var qp, block, notify *int64
-		if m, ok := metas[b.Name]; ok {
-			if m.HasBlock {
-				v := m.BlockSize
+		blockKnown, notifyKnown := false, false
+		if bucketsOK {
+			blockKnown, notifyKnown = true, true
+			if m, ok := metas[b.Name]; ok {
+				if m.HasBlock {
+					v := m.BlockSize
+					block, qp = &v, &v
+				}
+				if m.HasNotify {
+					v := m.NotificationSize
+					notify = &v
+				}
+			}
+		} else if c, ok := prev[b.Name]; ok {
+			blockKnown = c.blockKnown
+			notifyKnown = c.notifyKnown
+			if c.blockKnown && c.block != nil {
+				v := *c.block
 				block, qp = &v, &v
 			}
-			if m.HasNotify {
-				v := m.NotificationSize
+			if c.notifyKnown && c.notify != nil {
+				v := *c.notify
 				notify = &v
 			}
 		}
-		streak, confirmed := quota.Apply(prev[b.Name], qp, b.UsedBytes)
+		c := prev[b.Name]
+		streak, confirmed := quota.Advance(c.streak, c.confirmed, bucketsOK, blockKnown, qp, b.UsedBytes)
 
-		// Normalise to UTC before bind — same class of bug Phoenix shipped once.
 		uptodate := b.UptodateTill.UTC()
-		rows = append(rows, store.StateRow{
-			Namespace:     b.Namespace,
-			Bucket:        b.Name,
-			UsedBytes:     b.UsedBytes,
-			Objects:       b.Objects,
-			MPUBytes:      b.MPUBytes,
-			UptodateTill:  &uptodate,
-			PolledAt:      now,
-			OverStreak:    streak,
-			ConfirmedOver: confirmed,
-		})
-
 		bs := BucketState{
 			Name:             b.Name,
-			Namespace:        b.Namespace,
+			Namespace:        p.namespace,
 			UsedBytes:        b.UsedBytes,
 			Objects:          b.Objects,
 			MPUBytes:         b.MPUBytes,
 			QuotaBytes:       qp,
 			BlockSize:        block,
+			BlockKnown:       blockKnown,
 			NotificationSize: notify,
-			UptodateTill:     uptodate.UTC(),
+			NotifyKnown:      notifyKnown,
+			UptodateTill:     uptodate,
 			Stale:            !uptodate.IsZero() && now.Sub(uptodate) > th,
 			AtQuota:          qp != nil && b.UsedBytes >= *qp,
 			OverStreak:       streak,
@@ -247,54 +291,78 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	}
 	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Name < buckets[j].Name })
 
-	if err := p.store.UpsertStates(ctx, rows); err != nil {
-		p.log.Error("poller: persist state failed", "err", err)
-	}
-
-	// Namespace quota is ECS-native now, like buckets: the namespace-level
-	// blockSize threshold (GiB, normalized to bytes by the parser) is the
-	// limit, with the same 2-sample hysteresis before /health/quota trips.
-	// On a failed inventory poll, fall back to the prior poll's values so a
-	// limiter does not blink off on one bad enrich.
 	var nsDefault, nsBlock, nsNotify *int64
-	if nsmeta != nil {
-		if nsmeta.HasDefaultBucketBlock {
-			v := nsmeta.DefaultBucketBlock
-			nsDefault = &v
+	nsDefaultKnown, nsBlockKnown, nsNotifyKnown := false, false, false
+	if nsOK {
+		// A successful namespace response is authoritative even when fields
+		// are unset. Do not reinstate the previous limit because the bucket
+		// endpoint failed.
+		nsDefaultKnown, nsBlockKnown, nsNotifyKnown = true, true, true
+		if nsmeta != nil {
+			if nsmeta.HasDefaultBucketBlock {
+				v := nsmeta.DefaultBucketBlock
+				nsDefault = &v
+			}
+			if nsmeta.HasBlock {
+				v := nsmeta.BlockSize
+				nsBlock = &v
+			}
+			if nsmeta.HasNotify {
+				v := nsmeta.NotificationSize
+				nsNotify = &v
+			}
 		}
-		if nsmeta.HasBlock {
-			v := nsmeta.BlockSize
-			nsBlock = &v
-		}
-		if nsmeta.HasNotify {
-			v := nsmeta.NotificationSize
-			nsNotify = &v
-		}
-	}
-	if !invOK {
-		pd, pb, pn := p.previousNamespaceMeta()
-		if nsDefault == nil {
-			nsDefault = pd
-		}
-		if nsBlock == nil {
-			nsBlock = pb
-		}
-		if nsNotify == nil {
-			nsNotify = pn
-		}
+	} else {
+		nsDefault, nsDefaultKnown = prevDefault.bytes, prevDefault.known
+		nsBlock, nsBlockKnown = prevBlock.bytes, prevBlock.known
+		nsNotify, nsNotifyKnown = prevNotify.bytes, prevNotify.known
 	}
 
 	var nsQuotaBytes *int64
 	var nsPct *float64
 	var nsAtQuota bool
-	var nsStreak int
-	var nsConfirmed bool
-	if nsBlock != nil {
-		nsQuotaBytes = nsBlock
-		nsStreak, nsConfirmed = quota.Apply(p.prevNamespaceStreak(), nsQuotaBytes, payload.NamespaceBytes)
-		nsAtQuota = payload.NamespaceBytes >= *nsQuotaBytes
-		pct := float64(payload.NamespaceBytes) / float64(*nsQuotaBytes) * 100
+	if nsBlockKnown && nsBlock != nil {
+		v := *nsBlock
+		nsQuotaBytes = &v
+		nsAtQuota = payload.NamespaceBytes >= v
+		pct := float64(payload.NamespaceBytes) / float64(v) * 100
 		nsPct = &pct
+	}
+	nsStreak, nsConfirmed := quota.Advance(nsPrevStreak, nsPrevConfirmed, nsOK, nsBlockKnown, nsQuotaBytes, payload.NamespaceBytes)
+
+	rows := make([]store.StateRow, 0, len(buckets))
+	for _, bs := range buckets {
+		uptodate := bs.UptodateTill.UTC()
+		rows = append(rows, store.StateRow{
+			Namespace:     p.namespace,
+			Bucket:        bs.Name,
+			UsedBytes:     bs.UsedBytes,
+			Objects:       bs.Objects,
+			MPUBytes:      bs.MPUBytes,
+			UptodateTill:  &uptodate,
+			PolledAt:      now,
+			OverStreak:    bs.OverStreak,
+			ConfirmedOver: bs.ConfirmedOver,
+			Block:         store.Observed(bs.BlockKnown, bs.BlockSize),
+			Notify:        store.Observed(bs.NotifyKnown, bs.NotificationSize),
+		})
+	}
+	if err := p.store.ReplaceObservation(ctx, store.Observation{
+		Namespace: p.namespace,
+		NamespaceState: store.NamespaceState{
+			Namespace:     p.namespace,
+			UsedBytes:     payload.NamespaceBytes,
+			Objects:       payload.NamespaceObjects,
+			PolledAt:      now,
+			OverStreak:    nsStreak,
+			ConfirmedOver: nsConfirmed,
+			DefaultBlock:  store.Observed(nsDefaultKnown, nsDefault),
+			Block:         store.Observed(nsBlockKnown, nsBlock),
+			Notify:        store.Observed(nsNotifyKnown, nsNotify),
+		},
+		Buckets: rows,
+	}); err != nil {
+		p.log.Error("poller: persist state failed", "err", err)
 	}
 
 	p.mu.Lock()
@@ -311,8 +379,11 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		NamespaceOverStreak:       nsStreak,
 		NamespaceConfirmedOver:    nsConfirmed,
 		NamespaceDefaultBlock:     nsDefault,
+		NamespaceDefaultKnown:     nsDefaultKnown,
 		NamespaceBlockSize:        nsBlock,
+		NamespaceBlockKnown:       nsBlockKnown,
 		NamespaceNotificationSize: nsNotify,
+		NamespaceNotifyKnown:      nsNotifyKnown,
 		InventoryOK:               invOK,
 		InventoryError:            invErr,
 		Buckets:                   buckets,
@@ -324,92 +395,74 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	p.log.Info("poller: billing poll ok", "buckets", len(buckets), "namespace_bytes", payload.NamespaceBytes)
 }
 
-// fetchInventory best-effort loads bucket + namespace info. Billing stays
-// the source of truth: failures return ok=false and the caller falls back
-// to the previous poll's thresholds, never PollOK=false.
-func (p *Poller) fetchInventory(ctx context.Context) (map[string]ecs.BucketMeta, *ecs.NamespaceMeta, bool, string) {
+// fetchInventory loads bucket and namespace info independently. Billing
+// stays the source of truth: either failure leaves PollOK alone and the
+// caller falls back only for the endpoint that failed.
+func (p *Poller) fetchInventory(ctx context.Context) (map[string]ecs.BucketMeta, bool, *ecs.NamespaceMeta, bool, string) {
 	src, ok := p.client.(inventorySource)
 	if !ok {
-		return map[string]ecs.BucketMeta{}, nil, false, ""
+		return map[string]ecs.BucketMeta{}, false, nil, false, ""
 	}
 	metas, berr := src.BucketMetas(ctx, p.namespace)
 	nsmeta, nerr := src.NamespaceMetaInfo(ctx, p.namespace)
-	if berr != nil || nerr != nil {
-		msg := ""
-		if berr != nil {
-			msg += "buckets: " + berr.Error()
+	msg := ""
+	if berr != nil {
+		msg = "buckets: " + berr.Error()
+		metas = map[string]ecs.BucketMeta{}
+	}
+	if nerr != nil {
+		if msg != "" {
+			msg += "; "
 		}
-		if nerr != nil {
-			if msg != "" {
-				msg += "; "
-			}
-			msg += "namespace: " + nerr.Error()
-		}
-		if metas == nil {
-			metas = map[string]ecs.BucketMeta{}
-		}
-		return metas, nsmeta, false, msg
+		msg += "namespace: " + nerr.Error()
+		nsmeta = nil
 	}
 	if metas == nil {
 		metas = map[string]ecs.BucketMeta{}
 	}
-	return metas, nsmeta, true, ""
+	return metas, berr == nil, nsmeta, nerr == nil, msg
 }
 
-// previousInventory returns the last poll's block/notify thresholds keyed
-// by bucket, for carry-over when a fresh enrich fails.
-func (p *Poller) previousInventory() map[string]ecs.BucketMeta {
+type carriedBucket struct {
+	streak      int
+	confirmed   bool
+	blockKnown  bool
+	block       *int64
+	notifyKnown bool
+	notify      *int64
+}
+
+type carriedLimit struct {
+	known bool
+	bytes *int64
+}
+
+func cloneI64(v *int64) *int64 {
+	if v == nil {
+		return nil
+	}
+	c := *v
+	return &c
+}
+
+func (p *Poller) carried() (buckets map[string]carriedBucket, nsStreak int, nsConfirmed bool, nsDefault, nsBlock, nsNotify carriedLimit) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	out := make(map[string]ecs.BucketMeta, len(p.snap.Buckets))
+	buckets = make(map[string]carriedBucket, len(p.snap.Buckets))
 	for _, b := range p.snap.Buckets {
-		m := ecs.BucketMeta{Name: b.Name, Namespace: b.Namespace}
-		if b.BlockSize != nil {
-			m.BlockSize, m.HasBlock = *b.BlockSize, true
+		buckets[b.Name] = carriedBucket{
+			streak:      b.OverStreak,
+			confirmed:   b.ConfirmedOver,
+			blockKnown:  b.BlockKnown,
+			block:       cloneI64(b.BlockSize),
+			notifyKnown: b.NotifyKnown,
+			notify:      cloneI64(b.NotificationSize),
 		}
-		if b.NotificationSize != nil {
-			m.NotificationSize, m.HasNotify = *b.NotificationSize, true
-		}
-		out[b.Name] = m
 	}
-	return out
-}
-
-// previousNamespaceMeta returns the prior poll's namespace-level
-// default/block/notify values (value-copied) for carry-over when a fresh
-// inventory poll fails, so a limiter does not blink off on one bad enrich.
-func (p *Poller) previousNamespaceMeta() (defaultBlock, block, notify *int64) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if v := p.snap.NamespaceDefaultBlock; v != nil {
-		c := *v
-		defaultBlock = &c
-	}
-	if v := p.snap.NamespaceBlockSize; v != nil {
-		c := *v
-		block = &c
-	}
-	if v := p.snap.NamespaceNotificationSize; v != nil {
-		c := *v
-		notify = &c
-	}
-	return defaultBlock, block, notify
-}
-
-func (p *Poller) previousStreaks() map[string]int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	out := make(map[string]int, len(p.snap.Buckets))
-	for _, b := range p.snap.Buckets {
-		out[b.Name] = b.OverStreak
-	}
-	return out
-}
-
-func (p *Poller) prevNamespaceStreak() int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.snap.NamespaceOverStreak
+	return buckets, p.snap.NamespaceOverStreak, p.snap.NamespaceConfirmedOver,
+		carriedLimit{known: p.snap.NamespaceDefaultKnown, bytes: cloneI64(p.snap.NamespaceDefaultBlock)},
+		carriedLimit{known: p.snap.NamespaceBlockKnown, bytes: cloneI64(p.snap.NamespaceBlockSize)},
+		carriedLimit{known: p.snap.NamespaceNotifyKnown, bytes: cloneI64(p.snap.NamespaceNotificationSize)}
 }
 
 // Snapshot returns a copy of the current snapshot.

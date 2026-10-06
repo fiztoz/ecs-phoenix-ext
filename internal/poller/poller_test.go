@@ -52,7 +52,7 @@ func payload(usedBytes int64, uptodateAgo time.Duration, now time.Time) *ecs.Bil
 		}},
 	}
 }
-func newTestPoller(t *testing.T, src BillingSource, mem *store.Mem, now time.Time) *Poller {
+func newTestPoller(t *testing.T, src BillingSource, mem store.Store, now time.Time) *Poller {
 	t.Helper()
 	p := New(context.Background(), src, mem, "prod-ns", 15*time.Minute, quietLog())
 	p.now = func() time.Time { return now }

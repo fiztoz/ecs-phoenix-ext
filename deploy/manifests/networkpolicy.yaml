@@ -1,6 +1,10 @@
-# Extension egress: ECS management plane :4443 only (plus DNS).
-# Phoenix's own NetworkPolicy is NOT widened — Phoenix never speaks the
-# management plane.
+# Standalone extension egress. Phoenix's chart-generated extension policy
+# already permits database traffic; this file is only for the manifests in
+# this directory. Phoenix's own NetworkPolicy is not widened.
+#
+# Migrations run before the HTTP listener starts, so MariaDB must be allowed
+# or the pod never serves. Unrelated destinations stay blocked: there is no
+# 0.0.0.0/0 rule and no broad HTTP egress.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -18,6 +22,26 @@ spec:
       ports:
         - protocol: TCP
           port: 4443
+    # In-cluster MariaDB in this namespace. Matches Phoenix chart MariaDB
+    # pods (app.kubernetes.io/component: mariadb) without pinning the release
+    # name. Port 3306 is the documented default; change the port if
+    # mariadb.service.port is not 3306.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: mariadb
+      ports:
+        - protocol: TCP
+          port: 3306
+    # External MariaDB: delete the podSelector rule above and use only the
+    # database host. Do not widen this to 0.0.0.0/0. Example for a nondefault
+    # port:
+    # - to:
+    #     - ipBlock:
+    #         cidr: 203.0.113.10/32
+    #   ports:
+    #     - protocol: TCP
+    #       port: 3307
     - to: [] # DNS
       ports:
         - protocol: UDP

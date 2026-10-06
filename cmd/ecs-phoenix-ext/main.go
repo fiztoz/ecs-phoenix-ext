@@ -60,7 +60,8 @@ func run() error {
 	}
 
 	// ECS may be down at startup: never crash-loop for that. HTTP comes up,
-	// /health/live is 200 and /health/ready is 503 until a poll succeeds.
+	// /health/live is 200 (Kubernetes serving readiness) and /health/ready is
+	// 503 until a poll succeeds (Phoenix dependency monitor).
 	p := poller.New(ctx, client, st, cfg.ECSNamespace, cfg.PollInterval, log)
 	go p.Run(ctx)
 

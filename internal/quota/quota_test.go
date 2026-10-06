@@ -4,6 +4,25 @@ import "testing"
 
 func i64(v int64) *int64 { return &v }
 
+func TestAdvanceRetainsUnknownAndNonAuthoritativeAlarms(t *testing.T) {
+	q := i64(100)
+	if streak, conf := Advance(2, true, false, false, nil, 1); streak != 2 || !conf {
+		t.Fatalf("unknown threshold must not clear a confirmed alarm, got (%d,%v)", streak, conf)
+	}
+	if streak, conf := Advance(2, true, false, true, q, 1); streak != 2 || !conf {
+		t.Fatalf("cached under-limit sample must not clear a confirmed alarm, got (%d,%v)", streak, conf)
+	}
+	if streak, conf := Advance(2, true, false, true, q, 200); streak != 3 || !conf {
+		t.Fatalf("cached over sample should advance, got (%d,%v)", streak, conf)
+	}
+	if streak, conf := Advance(2, true, true, true, nil, 200); streak != 0 || conf {
+		t.Fatalf("authoritative quota-off must clear, got (%d,%v)", streak, conf)
+	}
+	if streak, conf := Advance(2, true, true, true, q, 50); streak != 0 || conf {
+		t.Fatalf("authoritative under-limit must clear, got (%d,%v)", streak, conf)
+	}
+}
+
 func TestApply(t *testing.T) {
 	cases := []struct {
 		name     string

@@ -53,8 +53,9 @@ func (s *SQLite) Migrate(ctx context.Context) error {
 const upsertStateSQLite = `
 INSERT INTO ext_ecs_usage_state
   (namespace, bucket, used_bytes, objects, mpu_bytes, uptodate_till,
-   polled_at, over_streak, confirmed_over, last_error)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   polled_at, over_streak, confirmed_over, last_error,
+   block_bytes, block_known, notify_bytes, notify_known)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(namespace, bucket) DO UPDATE SET
   used_bytes = excluded.used_bytes,
   objects = excluded.objects,
@@ -63,23 +64,40 @@ ON CONFLICT(namespace, bucket) DO UPDATE SET
   polled_at = excluded.polled_at,
   over_streak = excluded.over_streak,
   confirmed_over = excluded.confirmed_over,
-  last_error = excluded.last_error`
+  last_error = excluded.last_error,
+  block_bytes = excluded.block_bytes,
+  block_known = excluded.block_known,
+  notify_bytes = excluded.notify_bytes,
+  notify_known = excluded.notify_known`
 
-func (s *SQLite) UpsertStates(ctx context.Context, rows []StateRow) error {
-	for _, r := range rows {
-		if _, err := s.db.ExecContext(ctx, upsertStateSQLite,
-			r.Namespace, r.Bucket, r.UsedBytes, r.Objects, r.MPUBytes,
-			bindNullUTC(r.UptodateTill),
-			bindUTC(r.PolledAt), r.OverStreak, r.ConfirmedOver, nullString(r.LastError),
-		); err != nil {
-			return fmt.Errorf("store: upsert state %s/%s: %w", r.Namespace, r.Bucket, err)
-		}
-	}
-	return nil
+const upsertNamespaceSQLite = `
+INSERT INTO ext_ecs_usage_namespace_state
+  (namespace, used_bytes, objects, polled_at, over_streak, confirmed_over,
+   default_block_bytes, default_known, block_bytes, block_known, notify_bytes, notify_known)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(namespace) DO UPDATE SET
+  used_bytes = excluded.used_bytes,
+  objects = excluded.objects,
+  polled_at = excluded.polled_at,
+  over_streak = excluded.over_streak,
+  confirmed_over = excluded.confirmed_over,
+  default_block_bytes = excluded.default_block_bytes,
+  default_known = excluded.default_known,
+  block_bytes = excluded.block_bytes,
+  block_known = excluded.block_known,
+  notify_bytes = excluded.notify_bytes,
+  notify_known = excluded.notify_known`
+
+func (s *SQLite) ReplaceObservation(ctx context.Context, obs Observation) error {
+	return replaceObservation(ctx, s.db, upsertStateSQLite, upsertNamespaceSQLite, obs)
 }
 
 func (s *SQLite) States(ctx context.Context) ([]StateRow, error) {
 	return queryStates(ctx, s.db)
+}
+
+func (s *SQLite) NamespaceStates(ctx context.Context) ([]NamespaceState, error) {
+	return queryNamespaceStates(ctx, s.db)
 }
 
 func (s *SQLite) Close() error { return s.db.Close() }

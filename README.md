@@ -85,28 +85,33 @@ default CI runs fixture tests only.
 | `UI_TOKEN` | no | empty | If set, dashboard/API/forms require `Authorization: Bearer …` or a `ui_token` query/form parameter. A valid credential is exchanged for an HttpOnly `SameSite=Lax` session cookie (`ecs_ui_session`, scoped to `BASE_PATH`) so the extension's own links and form posts keep working — this is what makes the Phoenix iframe flow work end-to-end. Empty means the UI is open to anyone who can reach it. Health stays open either way |
 | `LOG_LEVEL` | no | `info` | slog level |
 
-## MariaDB (dedicated user, manual creation)
+## MariaDB (dedicated schema and user, manual creation)
 
-The plugin migrates its own `ext_ecs_usage_*` tables on start. The DBA
-creates the user once — Phoenix never does, and the plugin user only ever
-gets grants on its own prefix:
+The plugin migrates its own `ext_ecs_usage_*` tables on start. MariaDB does
+not treat a table-name fragment such as `ext_ecs_usage_%` as a prefix grant,
+so the DBA provisions a **dedicated schema** instead of a grant on the
+Phoenix application schema. Executable SQL is in `deploy/grants.sql`.
+Substitute the password from your secret store before running it. Do not
+reuse Phoenix's application credentials, and do not `GRANT` on `phoenix.*`.
 
-```sql
-CREATE USER 'ecs_usage'@'%' IDENTIFIED BY '<choose-a-strong-value>';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER
-  ON phoenix.ext_ecs_usage\_% TO 'ecs_usage'@'%';
-FLUSH PRIVILEGES;
-```
-
-`DATABASE_DSN` then is the DSN for that user only. Never mount the Phoenix
-application DSN into this pod.
+`DATABASE_DSN` must select database `ecs_usage` (not the Phoenix application
+schema). Schema-level rights cover tables added by later migrations; no
+per-table grant update is required. If a dedicated schema is impossible,
+`deploy/grants.sql` lists the current tables to grant explicitly — update
+that list before deploying a migration that creates another table.
 
 ## Kubernetes shape
 
 Separate Deployment (not a sidecar), Service, and an Ingress path
 `/storage` **before** the catch-all `/`. See `deploy/manifests/`.
-Extension NetworkPolicy allows egress to ECS `:4443` only; Phoenix's own
-NetworkPolicy is not widened.
+The standalone NetworkPolicy allows ECS `:4443`, DNS, and MariaDB
+`:3306` to pods labeled `app.kubernetes.io/component: mariadb` in the same
+namespace. For an external database, replace that pod selector with an
+ipBlock of the database host only (see the comments in
+`deploy/manifests/networkpolicy.yaml`) and set the port if it is not 3306.
+Do not open `0.0.0.0/0`. Phoenix's own NetworkPolicy is not widened; the
+chart-generated extension policy already permits database egress and is a
+separate object.
 
 Phoenix-side wiring (in the Phoenix chart overlay):
 
@@ -115,16 +120,24 @@ extensions:
   - id: ecs-phoenix-ext
     title: Storage
     path: /storage
-    image: ghcr.io/fiztoz/ecs-phoenix-ext:0.1.0
+    image: ghcr.io/fiztoz/ecs-phoenix-ext:0.2.2
     port: 80
+    readinessPath: /health/live
     database:
       secretName: ecs-phoenix-ext-db
 ```
 
+`readinessPath` must be `/health/live`. That endpoint is serving readiness:
+it stays 200 while the process can serve cached dashboard and wallboard
+data. The chart default `/health/ready` is ECS dependency health and will
+remove the only pod from Service endpoints during an ECS outage, which also
+hides `/health/quota`. Keep pointing Phoenix HTTP monitors at the dependency
+endpoint; do not use it as the Kubernetes probe.
+
 Then add Phoenix HTTP monitors against:
 
 - `{base}/health/ready` — ECS management plane unreachable
-- `{base}/health/quota` — a bucket is confirmed over quota
+- `{base}/health/quota` — a bucket or namespace is confirmed over quota
 
 ### Phoenix iframe + UI_TOKEN
 
@@ -159,11 +172,11 @@ GHCR on every push to `main` and on version tags:
 | Ref | Tags |
 |---|---|
 | `main` | `:dev`, `:sha-<short>` |
-| `v0.1.0` | `:0.1.0`, `:0.1`, `:latest` |
+| `v0.2.2` | `:0.2.2`, `:0.2`, `:latest` |
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.2
+git push origin v0.2.2
 ```
 
 After the first successful publish, make the package public once:

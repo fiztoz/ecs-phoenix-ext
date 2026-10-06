@@ -9,6 +9,22 @@ import (
 	ecsphoenixext "github.com/fiztoz/ecs-phoenix-ext"
 )
 
+func obsOf(rows ...StateRow) Observation {
+	ns := "ns"
+	if len(rows) > 0 && rows[0].Namespace != "" {
+		ns = rows[0].Namespace
+	}
+	polled := time.Now().UTC()
+	if len(rows) > 0 && !rows[0].PolledAt.IsZero() {
+		polled = rows[0].PolledAt.UTC()
+	}
+	return Observation{
+		Namespace:      ns,
+		NamespaceState: NamespaceState{Namespace: ns, PolledAt: polled},
+		Buckets:        rows,
+	}
+}
+
 func openTestSQLite(t *testing.T) *SQLite {
 	t.Helper()
 	dsn := "file:" + filepath.Join(t.TempDir(), "test.db")
@@ -49,13 +65,13 @@ func TestSQLiteStateRoundtripUTC(t *testing.T) {
 		UptodateTill: &ut, PolledAt: polled,
 		OverStreak: 1, ConfirmedOver: false, LastError: "",
 	}
-	if err := s.UpsertStates(ctx, []StateRow{row}); err != nil {
+	if err := s.ReplaceObservation(ctx, obsOf(row)); err != nil {
 		t.Fatal(err)
 	}
-	// Upsert updates in place.
+	// A second complete snapshot updates in place.
 	row.OverStreak = 2
 	row.ConfirmedOver = true
-	if err := s.UpsertStates(ctx, []StateRow{row}); err != nil {
+	if err := s.ReplaceObservation(ctx, obsOf(row)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -98,7 +114,7 @@ func TestSQLiteZeroTimesBindAsNull(t *testing.T) {
 		UptodateTill: &time.Time{}, // zero means "no timestamp"
 		PolledAt:     time.Now().UTC(),
 	}
-	if err := s.UpsertStates(ctx, []StateRow{row}); err != nil {
+	if err := s.ReplaceObservation(ctx, obsOf(row)); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := s.States(ctx)
