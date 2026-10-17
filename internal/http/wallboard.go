@@ -1,11 +1,25 @@
 package http
 
 import (
+	"math"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 )
+
+// busiestEntry is one row of the wallboard's busiest strip. Like every
+// activity number here it is derived from billing deltas: write-side movement
+// only, never a measured request rate.
+type busiestEntry struct {
+	Name        string
+	ObjectsRate string
+	BytesRate   string
+	Busy        string
+	Hot         bool
+	HasMPU      bool
+	MPUParts    int64
+}
 
 type wallboardData struct {
 	BasePath               string
@@ -31,6 +45,17 @@ type wallboardData struct {
 	NamespaceNotify        string
 	HasNamespaceNotify     bool
 	Buckets                []bucketView
+	// ActivityWindow labels the busy counters, e.g. "24h".
+	ActivityWindow string
+	// HotBuckets counts buckets with movement in most measured hours.
+	HotBuckets int
+	// Busiest is the top-N ranking for the wallboard strip.
+	Busiest []busiestEntry
+	// NamespaceMeteringAsOf is ECS's own uptodate_till for the namespace. It is
+	// shown because it can lag the poll time by days, which changes how the
+	// usage numbers should be read.
+	NamespaceMeteringAsOf time.Time
+	HasNamespaceMetering  bool
 }
 
 func (s *Server) handleWallboard(w http.ResponseWriter, r *http.Request) {
@@ -46,6 +71,11 @@ func (s *Server) handleWallboard(w http.ResponseWriter, r *http.Request) {
 		NamespaceUsed:      HumanBytes(snap.NamespaceBytes),
 		NamespaceUsedBytes: snap.NamespaceBytes,
 		NamespaceObjects:   snap.NamespaceObjects,
+		ActivityWindow:     shortDuration(snap.ActivityWindow),
+	}
+	if !snap.NamespaceUptodateTill.IsZero() {
+		data.HasNamespaceMetering = true
+		data.NamespaceMeteringAsOf = snap.NamespaceUptodateTill.UTC()
 	}
 
 	// Namespace-level quota.
@@ -74,8 +104,12 @@ func (s *Server) handleWallboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, b := range snap.Buckets {
-		data.Buckets = append(data.Buckets, toBucketView(b))
+		data.Buckets = append(data.Buckets, toBucketView(b, snap.ActivityWindow))
+		if b.Activity.Hot {
+			data.HotBuckets++
+		}
 	}
+	data.Busiest = busiestBuckets(data.Buckets, 5)
 
 	// Severity first, like the uptime-phoenix wallboard: over-quota cards
 	// before yellow-80% before at-quota before stale before ok; name order within each tier.
@@ -106,4 +140,43 @@ func severityRank(b bucketView) int {
 	default:
 		return 4 // ok/green UP
 	}
+}
+
+// busiestBuckets ranks buckets by "always used" first — measured hours with
+// movement — then by ingest rate, so a bucket that is steadily busy outranks
+// one that spiked once. Buckets with no measured activity at all are left out
+// rather than shown as zero.
+func busiestBuckets(buckets []bucketView, limit int) []busiestEntry {
+	ranked := make([]bucketView, 0, len(buckets))
+	for _, b := range buckets {
+		if b.Activity.BusyScore >= 0 || b.Activity.Score >= 0 {
+			ranked = append(ranked, b)
+		}
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		a, c := ranked[i].Activity, ranked[j].Activity
+		if a.BusyHours != c.BusyHours {
+			return a.BusyHours > c.BusyHours
+		}
+		if a.Score != c.Score {
+			return a.Score > c.Score
+		}
+		if math.Abs(a.BytesPerHour) != math.Abs(c.BytesPerHour) {
+			return math.Abs(a.BytesPerHour) > math.Abs(c.BytesPerHour)
+		}
+		return ranked[i].Name < ranked[j].Name
+	})
+	out := make([]busiestEntry, 0, limit)
+	for _, b := range ranked[:min(limit, len(ranked))] {
+		out = append(out, busiestEntry{
+			Name:        b.Name,
+			ObjectsRate: b.Activity.ObjectsRate,
+			BytesRate:   b.Activity.BytesRate,
+			Busy:        b.Activity.Busy,
+			Hot:         b.Activity.Hot,
+			HasMPU:      b.Activity.HasMPU,
+			MPUParts:    b.Activity.MPUParts,
+		})
+	}
+	return out
 }

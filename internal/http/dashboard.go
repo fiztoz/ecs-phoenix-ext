@@ -12,8 +12,9 @@ import (
 
 // bucketView is the pre-formatted per-bucket row for templates.
 // Only necessary columns are shown: name, usage, objects, block/notify
-// sizing knobs, quota % and status. MPU is folded into Used (billing
-// already sums total+mpu) and deliberately has no column.
+// sizing knobs, quota % and status. MPU bytes are folded into Used (billing
+// already sums total+mpu) and deliberately have no column; in-flight MPU
+// parts surface under Activity because they mean an upload is running.
 type bucketView struct {
 	Name          string
 	Used          string
@@ -37,6 +38,10 @@ type bucketView struct {
 	OverStreak    int
 	ConfirmedOver bool
 	NotifyReached bool // used >= ECS notification threshold
+	// Activity is derived write-side movement. See activityView: reads are
+	// invisible to it because ECS billing counts no requests.
+	Activity     activityView
+	UptodateTill time.Time // ECS metering freshness for this bucket
 }
 
 type dashboardData struct {
@@ -65,6 +70,13 @@ type dashboardData struct {
 	HasNamespaceNotify     bool
 	Buckets                []bucketView
 	Flash                  string
+	// ActivityWindow labels the derived busy counters, e.g. "24h".
+	ActivityWindow string
+	// NamespaceMeteringAsOf is ECS's own uptodate_till for the namespace:
+	// metering is claimed current up to this instant. It is shown next to the
+	// poll time because the two can be days apart.
+	NamespaceMeteringAsOf time.Time
+	HasNamespaceMetering  bool
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -89,6 +101,11 @@ func (s *Server) buildDashboard(r *http.Request) dashboardData {
 		NamespaceUsedBytes: snap.NamespaceBytes,
 		NamespaceObjects:   snap.NamespaceObjects,
 		Flash:              r.URL.Query().Get("msg"),
+		ActivityWindow:     shortDuration(snap.ActivityWindow),
+	}
+	if !snap.NamespaceUptodateTill.IsZero() {
+		data.HasNamespaceMetering = true
+		data.NamespaceMeteringAsOf = snap.NamespaceUptodateTill.UTC()
 	}
 
 	// Namespace-level quota.
@@ -118,12 +135,12 @@ func (s *Server) buildDashboard(r *http.Request) dashboardData {
 	data.InventoryError = snap.InventoryError
 
 	for _, b := range snap.Buckets {
-		data.Buckets = append(data.Buckets, toBucketView(b))
+		data.Buckets = append(data.Buckets, toBucketView(b, snap.ActivityWindow))
 	}
 	return data
 }
 
-func toBucketView(b poller.BucketState) bucketView {
+func toBucketView(b poller.BucketState, window time.Duration) bucketView {
 	v := bucketView{
 		Name:          b.Name,
 		Used:          HumanBytes(b.UsedBytes),
@@ -144,6 +161,8 @@ func toBucketView(b poller.BucketState) bucketView {
 		Percent:       percentOrDash(b.UsedPercent),
 		BarWidth:      barWidth(b.UsedPercent),
 		NotifyReached: b.NotificationSize != nil && b.UsedBytes >= *b.NotificationSize,
+		Activity:      toActivityView(b.Activity, window),
+		UptodateTill:  b.UptodateTill,
 	}
 	if b.BlockSize != nil {
 		v.HasBlock = true

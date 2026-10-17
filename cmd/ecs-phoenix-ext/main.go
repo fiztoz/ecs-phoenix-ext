@@ -63,6 +63,7 @@ func run() error {
 	// /health/live is 200 (Kubernetes serving readiness) and /health/ready is
 	// 503 until a poll succeeds (Phoenix dependency monitor).
 	p := poller.New(ctx, client, st, cfg.ECSNamespace, cfg.PollInterval, log)
+	p.SetActivityWindow(cfg.ActivityWindow, cfg.ActivityRetention)
 	go p.Run(ctx)
 
 	srv, err := newHTTPServer(cfg, p, st, log)

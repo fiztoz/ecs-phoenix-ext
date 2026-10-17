@@ -161,6 +161,25 @@
   .color-warn { color:var(--warning); }
   .color-bad { color:var(--danger); }
 
+  /* Busiest strip */
+  .busiest { border:1px solid var(--border); border-radius:var(--radius); background:var(--card);
+             padding:0.75rem 1rem; margin-bottom:1rem; }
+  .busiest ol { list-style:none; margin:0.5rem 0 0; padding:0; display:flex; flex-direction:column;
+                gap:0.375rem; }
+  .busiest li { display:flex; flex-wrap:wrap; align-items:baseline; gap:0.75rem;
+                font-size:0.8125rem; padding-bottom:0.375rem;
+                border-bottom:1px solid oklch(1 0 0 / 0.05); }
+  .busiest li:last-child { border-bottom:none; padding-bottom:0; }
+  .busiest .rank { color:var(--faint); font-family:ui-monospace,"SF Mono",Menlo,monospace;
+                   font-size:0.6875rem; width:1.25rem; flex:none; }
+  .busiest .b-name { font-weight:600; min-width:0; overflow:hidden; text-overflow:ellipsis;
+                     white-space:nowrap; flex:1 1 8rem; }
+  .busiest .b-rate { font-family:ui-monospace,"SF Mono",Menlo,monospace; color:var(--muted-fg);
+                     font-size:0.75rem; }
+  .busiest .b-hours { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:0.75rem;
+                      color:var(--faint); }
+  .busiest .note { margin-top:0.5rem; font-size:0.6875rem; color:var(--faint); }
+
   /* Empty state */
   .empty { display:grid; place-items:center; min-height:16rem;
            border:1px dashed var(--border); border-radius:0.75rem; }
@@ -263,9 +282,22 @@
       <div class="k">Last poll</div>
       <div class="v" style="font-size:0.875rem">{{if .PolledAt.IsZero}}—{{else}}{{.PolledAt.UTC.Format "15:04 UTC"}} ({{age .PolledAt .Now}} ago){{end}}</div>
     </div>
+    {{if .HasNamespaceMetering}}
+    <div class="stat">
+      <div class="k">Metering current to</div>
+      <div class="v" style="font-size:0.875rem"
+           title="ECS namespace-level uptodate_till: ECS claims the metering is current up to this instant, which can lag the poll time by a long way">{{.NamespaceMeteringAsOf.UTC.Format "2006-01-02 15:04 UTC"}} ({{age .NamespaceMeteringAsOf .Now}} ago)</div>
+    </div>
+    {{end}}
     <div class="stat">
       <div class="k">Buckets</div>
       <div class="v tnum">{{len .Buckets}}</div>
+    </div>
+    <div class="stat">
+      <div class="k">Always busy {{.ActivityWindow}}</div>
+      <!-- Neutral colour on purpose: derived activity is information, not an
+           alarm. Amber here would read as "something is wrong". -->
+      <div class="v tnum">{{.HotBuckets}}</div>
     </div>
   </div>
 
@@ -278,12 +310,33 @@
       </div>
     {{end}}
 
+    {{if .Busiest}}
+    <section class="busiest">
+      <div class="eyebrow">Busiest {{.ActivityWindow}} — write-side, derived from billing deltas</div>
+      <ol>
+      {{range .Busiest}}
+        <li>
+          <span class="rank">{{if .Hot}}●{{end}}</span>
+          <span class="b-name">{{.Name}}</span>
+          <span class="b-rate">{{.ObjectsRate}}</span>
+          <span class="b-rate">{{.BytesRate}}</span>
+          <span class="b-hours">busy {{.Busy}}</span>
+          {{if .HasMPU}}<span class="b-hours">{{.MPUParts}} mpu parts</span>{{end}}
+        </li>
+      {{end}}
+      </ol>
+      <div class="note">Movement in objects/bytes/in-flight multipart parts between metering
+        samples. Reads are not counted by ECS billing, so a read-heavy bucket can look idle.</div>
+    </section>
+    {{end}}
+
     <div class="grid">
     {{range .Buckets}}
       <article class="card {{if .ConfirmedOver}}over{{else if ge .BarWidth 80}}yellow{{else if .AtQuota}}atquota{{else if .Stale}}stale{{else}}ok{{end}}">
         <div class="name">{{.Name}}</div>
         {{if ne .QuotaMode "off"}}<div class="meta-line">block: {{if .HasBlock}}{{.Block}}{{else}}—{{end}} · notify: {{if .HasNotify}}{{.Notify}}{{else}}—{{end}}</div>
         {{else}}<div class="meta-line">unlimited quota</div>{{end}}
+        {{if .Activity.Known}}<div class="meta-line">{{if eq .Activity.State "moved"}}{{.Activity.ObjectsRate}} · {{.Activity.BytesRate}}{{else if eq .Activity.State "idle"}}idle{{else if eq .Activity.State "unrefreshed"}}no new metering{{else}}no change observed{{end}}{{if ge .Activity.ObservedHours 1}} · busy {{.Activity.Busy}}{{end}}</div>{{end}}
         <div class="used tnum">{{.Used}}</div>
         {{if .HasQuota}}
           <div class="pct {{if or .ConfirmedOver .AtQuota}}color-bad{{else if ge .BarWidth 80}}color-warn{{else}}color-ok{{end}} tnum">{{.Percent}}</div>

@@ -19,6 +19,7 @@
 --   ext_ecs_usage_namespace_state
 --   ext_ecs_usage_quotas
 --   ext_ecs_usage_namespace_quotas
+--   ext_ecs_usage_activity_hourly
 
 CREATE DATABASE IF NOT EXISTS ecs_usage CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 

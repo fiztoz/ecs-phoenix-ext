@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -52,14 +53,15 @@ func (s *SQLite) Migrate(ctx context.Context) error {
 
 const upsertStateSQLite = `
 INSERT INTO ext_ecs_usage_state
-  (namespace, bucket, used_bytes, objects, mpu_bytes, uptodate_till,
+  (namespace, bucket, used_bytes, objects, mpu_bytes, mpu_parts, uptodate_till,
    polled_at, over_streak, confirmed_over, last_error,
    block_bytes, block_known, notify_bytes, notify_known)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(namespace, bucket) DO UPDATE SET
   used_bytes = excluded.used_bytes,
   objects = excluded.objects,
   mpu_bytes = excluded.mpu_bytes,
+  mpu_parts = excluded.mpu_parts,
   uptodate_till = excluded.uptodate_till,
   polled_at = excluded.polled_at,
   over_streak = excluded.over_streak,
@@ -98,6 +100,32 @@ func (s *SQLite) States(ctx context.Context) ([]StateRow, error) {
 
 func (s *SQLite) NamespaceStates(ctx context.Context) ([]NamespaceState, error) {
 	return queryNamespaceStates(ctx, s.db)
+}
+
+const upsertActivitySQLite = `
+INSERT INTO ext_ecs_usage_activity_hourly
+  (namespace, bucket, hour_bucket, samples, active_samples,
+   objects_up, objects_down, bytes_up, bytes_down, mpu_parts_max)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(namespace, bucket, hour_bucket) DO UPDATE SET
+  samples = samples + excluded.samples,
+  active_samples = active_samples + excluded.active_samples,
+  objects_up = objects_up + excluded.objects_up,
+  objects_down = objects_down + excluded.objects_down,
+  bytes_up = bytes_up + excluded.bytes_up,
+  bytes_down = bytes_down + excluded.bytes_down,
+  mpu_parts_max = MAX(mpu_parts_max, excluded.mpu_parts_max)`
+
+func (s *SQLite) RecordActivity(ctx context.Context, deltas []ActivityDelta) error {
+	return recordActivity(ctx, s.db, upsertActivitySQLite, deltas)
+}
+
+func (s *SQLite) ActivityHours(ctx context.Context, namespace string, since time.Time) ([]ActivityHour, error) {
+	return queryActivityHours(ctx, s.db, namespace, since)
+}
+
+func (s *SQLite) PruneActivity(ctx context.Context, cutoff time.Time) (int64, error) {
+	return pruneActivity(ctx, s.db, cutoff)
 }
 
 func (s *SQLite) Close() error { return s.db.Close() }

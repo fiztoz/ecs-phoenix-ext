@@ -12,6 +12,12 @@ in its own image.
   Inventory failures never flip `/health/ready` — usage stays live, the UI
   notes "Bucket info unavailable" instead.
 - Size units are **binary** (API `GB` means GiB; Dell KB 000273649).
+- Bucket activity ("which bucket is busy") is **derived** from the change in
+  objects / bytes / in-flight multipart parts between metering observations,
+  and rolled up per hour. ECS billing exposes no request counters to a
+  namespace-scoped management user, so write-side movement is all this tool
+  can see — read traffic is invisible. See
+  [Bucket activity](#bucket-activity-derived-write-side-only).
 - Bucket quotas are ECS-native (Block Access thresholds from the bucket
   inventory poll) with 2-sample hysteresis before `/health/quota` goes 503.
   Namespace quota is also ECS-native now (the namespace-level `blockSize`
@@ -29,6 +35,92 @@ Block + Notify (X/Y); the dashboard labels the mode under the bucket name.
 A 0/missing threshold means unset (quota off → Unlimited). The % bar and
 /health/quota alert on the Block Access threshold; the Notify threshold
 raises a yellow "notify threshold" warning.
+
+Activity · Busy {window} are derived, not measured: the signed objects/h and
+bytes/h change since the previous metering observation, and the hours with
+movement over the hours actually measured. Both columns are sortable; a
+bucket with no comparable baseline yet renders "—", never a fabricated zero.
+
+## Bucket activity (derived, write-side only)
+
+The management user this extension runs as is namespace-scoped
+(`NAMESPACE_ADMIN`). Cluster-level surfaces — the dashboard API, `/vdc/nodes`,
+node stats on `:9101` — need `SYSTEM_ADMIN`, and the NetworkPolicy only allows
+ECS `:4443` anyway. Per-bucket request counters are therefore **not available
+at any price this tool can pay**, so activity is derived from billing deltas:
+
+| Signal | Meaning | Honest limit |
+|---|---|---|
+| `objects/h`, `bytes/h` | net ingest (+) or deletion/expiry (−) | net, not gross: overwrite-in-place and write-then-delete both look like zero |
+| `mpu parts` | incomplete multipart parts in flight | a large upload shows before its objects exist |
+| `Busy {window}` = N/Mh | movement in N of M measured hours | M is hours *measured*, not hours elapsed: a low M is little evidence either way |
+| `always busy` badge | movement in ≥ half of ≥ 3 measured hours | still says nothing about reads |
+
+A bucket serving heavy GET traffic with no writes renders as idle. That is a
+property of ECS billing, not a bug here; the dashboard footer says so.
+
+### The four non-moving states
+
+"Nothing moved" has three different causes, and only one of them is idleness.
+Which one the UI can prove depends on whether ECS reports `uptodate_till`:
+
+| Cell reads | `state` in the API | Condition | Counts as a measured hour? |
+|---|---|---|---|
+| rates | `moved` | a counter changed since the baseline | yes, busy |
+| `idle` | `idle` | `uptodate_till` advanced and nothing moved | yes, not busy |
+| `no new metering` | `unrefreshed` | `uptodate_till` did **not** advance | no — ECS republished nothing, so there is nothing to measure |
+| `no change observed` | `unchanged` | ECS omits `uptodate_till`, so idle and unrefreshed are indistinguishable | yes — the poll is the only available observation |
+| `—` | `unknown` (activity is `null`) | no comparable baseline yet | no |
+
+Many ECS builds omit `uptodate_till` **per bucket** even though the namespace
+field is present, which puts every bucket in the `unchanged` row. That case is
+handled deliberately: skipping those polls instead would leave
+`BusyHours == ObservedHours` by construction, so anything that moved at all
+would be flagged `always busy` and anything quiet would show no evidence.
+
+Consequence worth knowing: the `stale sample` badge and the wallboard's stale
+tier are derived from `uptodate_till`, so on a cluster that omits it per bucket
+they never fire. Poll failures are still visible through the banner, `PollOK`
+and `/health/ready`.
+
+### The namespace metering marker
+
+ECS publishes one namespace-level `uptodate_till` alongside the billing payload,
+and it can lag wall clock by a long way. A production namespace reported
+`2026-10-14T04:13:30Z` — roughly two days behind — while its per-bucket counters
+kept changing between polls 30 minutes apart.
+
+The dashboard and wallboard show it as **"Metering current to … (2d3h ago)"**
+next to "Last poll", and `/api/buckets` exposes `namespace_uptodate_till` plus
+`namespace_metering_age_seconds`. It is **display only**:
+
+- It does not gate derived activity. If it did, a cluster like the one above
+  would record nothing at all, because the marker never advances between polls.
+- It does not drive the per-bucket `stale sample` badge, which comes from each
+  bucket's own `uptodate_till`.
+- It is not persisted, so it reads "—" until the first successful poll after a
+  restart.
+
+What the lag does mean for the numbers: a rate says when *this tool observed* a
+change, not when the activity happened. If ECS republishes or backfills an older
+window, the delta lands in the hour it was observed in. The dashboard footer
+says this whenever the marker is present.
+
+Mechanics:
+
+- The diff baseline moves only when the values are proven current as of that
+  poll — ECS advanced `uptodate_till`, or a counter moved. A run of polls that
+  all return the same unrefreshed sample widens the window instead of charging
+  hours of ingest to the last poll interval.
+- Deltas fold into `ext_ecs_usage_activity_hourly` — one row per bucket per
+  hour, so the table is bounded by hours, not by poll frequency. Ups and downs
+  are stored separately so churn does not cancel out.
+- The baseline is seeded from `ext_ecs_usage_state` on start, so a pod restart
+  keeps diffing against the pre-restart observation.
+- Activity is best-effort like inventory: a store failure there is logged and
+  never flips `/health/ready`, quota hysteresis or the usage numbers.
+- A failed poll records nothing. History is pruned to
+  `ECS_ACTIVITY_RETENTION`.
 
 ## Local run (SQLite, no MariaDB needed)
 
@@ -73,6 +165,8 @@ default CI runs fixture tests only.
 | `ECS_PASSWORD` | yes | — | From Secret. Never logged |
 | `ECS_SIZEUNIT` | no | `KB` | Query param `sizeunit` |
 | `ECS_POLL_INTERVAL` | no | `15m` | Go duration, minimum `1m` |
+| `ECS_ACTIVITY_WINDOW` | no | `24h` | Rolling lookback behind the Busy column and the wallboard ranking, minimum `1h` |
+| `ECS_ACTIVITY_RETENTION` | no | `336h` | How long hourly activity rows are kept (14d). Must be ≥ `ECS_ACTIVITY_WINDOW` and ≤ `2160h` |
 | `ECS_TLS_CA_FILE` | no | — | Path to PEM |
 | `ECS_TLS_CA` | no | — | Inline PEM |
 | `ECS_TLS_INSECURE` | no | `false` | Lab only |
@@ -120,7 +214,7 @@ extensions:
   - id: ecs-phoenix-ext
     title: Storage
     path: /storage
-    image: ghcr.io/fiztoz/ecs-phoenix-ext:0.2.2
+    image: ghcr.io/fiztoz/ecs-phoenix-ext:0.3.0
     port: 80
     readinessPath: /health/live
     database:
@@ -172,11 +266,11 @@ GHCR on every push to `main` and on version tags:
 | Ref | Tags |
 |---|---|
 | `main` | `:dev`, `:sha-<short>` |
-| `v0.2.2` | `:0.2.2`, `:0.2`, `:latest` |
+| `v0.3.0` | `:0.3.0`, `:0.3`, `:latest` |
 
 ```bash
-git tag v0.2.2
-git push origin v0.2.2
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 After the first successful publish, make the package public once:
@@ -210,8 +304,10 @@ set, and replace these files.
 
 Ideas deliberately parked; none are scheduled:
 
-- **Usage history / trends** — a per-poll samples table with retention, so
-  the wallboard could show sparklines instead of current state only.
+- **Usage history / trends** — activity history now exists as hourly rollups
+  (`ext_ecs_usage_activity_hourly`) feeding the Activity/Busy columns and the
+  wallboard ranking. Still parked: per-poll resolution and sparklines, which
+  would need a samples table with its own retention.
 - **Prometheus `/metrics`** — used-bytes gauge plus poll success/error
   counters, next to the existing health endpoints.
 - **Multi-namespace support** — v1 polls exactly one namespace by design.

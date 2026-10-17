@@ -43,7 +43,7 @@ func replaceObservation(ctx context.Context, db *sql.DB, bucketSQL, namespaceSQL
 		blockBytes, blockKnown := bindLimit(r.Block)
 		notifyBytes, notifyKnown := bindLimit(r.Notify)
 		if _, err := tx.ExecContext(ctx, bucketSQL,
-			r.Namespace, r.Bucket, r.UsedBytes, r.Objects, r.MPUBytes,
+			r.Namespace, r.Bucket, r.UsedBytes, r.Objects, r.MPUBytes, r.MPUParts,
 			bindNullUTC(r.UptodateTill),
 			bindUTC(r.PolledAt), r.OverStreak, boolInt(r.ConfirmedOver), nullString(r.LastError),
 			blockBytes, blockKnown, notifyBytes, notifyKnown,

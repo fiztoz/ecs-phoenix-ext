@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -52,14 +53,15 @@ func (m *MariaDB) Migrate(ctx context.Context) error {
 
 const upsertStateMaria = `
 INSERT INTO ext_ecs_usage_state
-  (namespace, bucket, used_bytes, objects, mpu_bytes, uptodate_till,
+  (namespace, bucket, used_bytes, objects, mpu_bytes, mpu_parts, uptodate_till,
    polled_at, over_streak, confirmed_over, last_error,
    block_bytes, block_known, notify_bytes, notify_known)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   used_bytes = VALUES(used_bytes),
   objects = VALUES(objects),
   mpu_bytes = VALUES(mpu_bytes),
+  mpu_parts = VALUES(mpu_parts),
   uptodate_till = VALUES(uptodate_till),
   polled_at = VALUES(polled_at),
   over_streak = VALUES(over_streak),
@@ -93,7 +95,7 @@ func (m *MariaDB) ReplaceObservation(ctx context.Context, obs Observation) error
 }
 
 const selectStates = `
-SELECT namespace, bucket, used_bytes, objects, mpu_bytes, uptodate_till,
+SELECT namespace, bucket, used_bytes, objects, mpu_bytes, mpu_parts, uptodate_till,
        polled_at, over_streak, confirmed_over, COALESCE(last_error, ''),
        block_bytes, block_known, notify_bytes, notify_known
 FROM ext_ecs_usage_state`
@@ -112,6 +114,32 @@ func (m *MariaDB) NamespaceStates(ctx context.Context) ([]NamespaceState, error)
 	return queryNamespaceStates(ctx, m.db)
 }
 
+const upsertActivityMaria = `
+INSERT INTO ext_ecs_usage_activity_hourly
+  (namespace, bucket, hour_bucket, samples, active_samples,
+   objects_up, objects_down, bytes_up, bytes_down, mpu_parts_max)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  samples = samples + VALUES(samples),
+  active_samples = active_samples + VALUES(active_samples),
+  objects_up = objects_up + VALUES(objects_up),
+  objects_down = objects_down + VALUES(objects_down),
+  bytes_up = bytes_up + VALUES(bytes_up),
+  bytes_down = bytes_down + VALUES(bytes_down),
+  mpu_parts_max = GREATEST(mpu_parts_max, VALUES(mpu_parts_max))`
+
+func (m *MariaDB) RecordActivity(ctx context.Context, deltas []ActivityDelta) error {
+	return recordActivity(ctx, m.db, upsertActivityMaria, deltas)
+}
+
+func (m *MariaDB) ActivityHours(ctx context.Context, namespace string, since time.Time) ([]ActivityHour, error) {
+	return queryActivityHours(ctx, m.db, namespace, since)
+}
+
+func (m *MariaDB) PruneActivity(ctx context.Context, cutoff time.Time) (int64, error) {
+	return pruneActivity(ctx, m.db, cutoff)
+}
+
 func (m *MariaDB) Close() error { return m.db.Close() }
 
 // --- shared query helpers ---
@@ -128,7 +156,7 @@ func queryStates(ctx context.Context, db *sql.DB) ([]StateRow, error) {
 		var uptodate, polled any
 		var confirmed any
 		var blockBytes, blockKnown, notifyBytes, notifyKnown any
-		if err := rows.Scan(&r.Namespace, &r.Bucket, &r.UsedBytes, &r.Objects, &r.MPUBytes,
+		if err := rows.Scan(&r.Namespace, &r.Bucket, &r.UsedBytes, &r.Objects, &r.MPUBytes, &r.MPUParts,
 			&uptodate, &polled, &r.OverStreak, &confirmed, &r.LastError,
 			&blockBytes, &blockKnown, &notifyBytes, &notifyKnown); err != nil {
 			return nil, fmt.Errorf("store: scan state: %w", err)

@@ -18,10 +18,16 @@ type Config struct {
 	SizeUnit     string `env:"ECS_SIZEUNIT" envDefault:"KB"`
 
 	PollInterval time.Duration `env:"ECS_POLL_INTERVAL" envDefault:"15m"`
-	TLSCAFile    string        `env:"ECS_TLS_CA_FILE"`
-	TLSCA        string        `env:"ECS_TLS_CA"`
-	TLSInsecure  bool          `env:"ECS_TLS_INSECURE" envDefault:"false"`
-	HTTPTimeout  time.Duration `env:"ECS_HTTP_TIMEOUT" envDefault:"60s"`
+	// ActivityWindow is the rolling lookback behind the derived "busy in N of
+	// the last M hours" counters; ActivityRetention bounds the hourly history
+	// table. Activity is derived from billing deltas: ECS reports no request
+	// counters, so read traffic is never visible in it.
+	ActivityWindow    time.Duration `env:"ECS_ACTIVITY_WINDOW" envDefault:"24h"`
+	ActivityRetention time.Duration `env:"ECS_ACTIVITY_RETENTION" envDefault:"336h"`
+	TLSCAFile         string        `env:"ECS_TLS_CA_FILE"`
+	TLSCA             string        `env:"ECS_TLS_CA"`
+	TLSInsecure       bool          `env:"ECS_TLS_INSECURE" envDefault:"false"`
+	HTTPTimeout       time.Duration `env:"ECS_HTTP_TIMEOUT" envDefault:"60s"`
 
 	ListenAddr     string `env:"LISTEN_ADDR" envDefault:":80"`
 	DatabaseDSN    string `env:"DATABASE_DSN,required"` // MariaDB DSN or file:/data/ecs-phoenix-ext.db
@@ -50,6 +56,16 @@ func Load() (*Config, error) {
 	}
 	if cfg.PollInterval < time.Minute {
 		return nil, fmt.Errorf("config: ECS_POLL_INTERVAL must be >= 1m, got %s", cfg.PollInterval)
+	}
+	if cfg.ActivityWindow < time.Hour {
+		return nil, fmt.Errorf("config: ECS_ACTIVITY_WINDOW must be >= 1h, got %s", cfg.ActivityWindow)
+	}
+	if cfg.ActivityRetention < cfg.ActivityWindow {
+		return nil, fmt.Errorf("config: ECS_ACTIVITY_RETENTION (%s) must be >= ECS_ACTIVITY_WINDOW (%s), or history is pruned before the window ends",
+			cfg.ActivityRetention, cfg.ActivityWindow)
+	}
+	if cfg.ActivityRetention > 90*24*time.Hour {
+		return nil, fmt.Errorf("config: ECS_ACTIVITY_RETENTION must be <= 2160h (90 days), got %s", cfg.ActivityRetention)
 	}
 
 	cfg.BasePath = strings.TrimSpace(cfg.BasePath)

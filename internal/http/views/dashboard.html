@@ -100,7 +100,7 @@
   /* Table */
   .table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; background:var(--card);
                 border:1px solid var(--border); border-radius:var(--radius); }
-  table { width:100%; border-collapse:collapse; min-width:860px; }
+  table { width:100%; border-collapse:collapse; min-width:1020px; }
   th, td { padding:0.625rem 0.75rem; text-align:left; border-bottom:1px solid var(--border);
            font-variant-numeric:tabular-nums; white-space:nowrap; }
   th { color:var(--faint); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.04em; font-weight:500; }
@@ -125,6 +125,8 @@
   .badge.atquota { background:oklch(0.8 0.16 80 / 0.12); color:var(--warning); }
   .badge.over { background:oklch(0.64 0.21 25 / 0.12); color:var(--danger); }
   .badge.ok { background:oklch(0.74 0.17 155 / 0.12); color:var(--success); }
+  .badge.mpu { background:oklch(0.72 0.13 250 / 0.12); color:var(--info); }
+  .badge.hot { background:oklch(0.68 0.19 35 / 0.14); color:var(--primary); }
 
   /* Forms */
   form.inline { display:inline-flex; gap:0.375rem; align-items:center; }
@@ -209,6 +211,9 @@
     {{end}}
     <div><div class="k">Objects</div><div class="v tnum">{{.NamespaceObjects}}</div></div>
     <div><div class="k">Last poll</div><div class="v" style="font-size:0.9375rem">{{if .PolledAt.IsZero}}—{{else}}{{.PolledAt.UTC.Format "2006-01-02 15:04 UTC"}} ({{age .PolledAt .Now}} ago){{end}}</div></div>
+    {{if .HasNamespaceMetering}}
+    <div><div class="k" title="ECS namespace-level uptodate_till: ECS claims the metering below is current up to this instant. It can lag the poll time by a long way, and this tool does not use it to judge bucket freshness.">Metering current to</div><div class="v" style="font-size:0.9375rem">{{.NamespaceMeteringAsOf.UTC.Format "2006-01-02 15:04 UTC"}} ({{age .NamespaceMeteringAsOf .Now}} ago)</div></div>
+    {{end}}
   </div>
   {{if .InventoryError}}
   <div class="sub" style="margin:-0.25rem 0 0.75rem;">Bucket info unavailable: {{.InventoryError}} — usage above is still live billing data.</div>
@@ -238,6 +243,8 @@
         <th class="sortable" data-key="notify">Notify<span class="arrow"></span></th>
         <th class="sortable" data-key="quota">Quota<span class="arrow"></span></th>
         <th class="sortable" data-key="percent">Used %<span class="arrow"></span></th>
+        <th class="sortable" data-key="activity">Activity<span class="arrow"></span></th>
+        <th class="sortable" data-key="busy">Busy {{.ActivityWindow}}<span class="arrow"></span></th>
         <th class="sortable" data-key="status">Status<span class="arrow"></span></th>
       </tr>
     </thead>
@@ -250,6 +257,8 @@
           data-mode="{{.QuotaMode}}"
           data-quota="{{if .HasQuota}}{{.QuotaBytes}}{{else}}-1{{end}}"
           data-percent="{{if .HasQuota}}{{if .ConfirmedOver}}9999{{else}}{{.BarWidth}}{{end}}{{else}}-1{{end}}"
+          data-activity="{{printf "%.4f" .Activity.Score}}"
+          data-busy="{{.Activity.BusyScore}}"
           data-status="{{if .ConfirmedOver}}over{{else if .AtQuota}}atquota{{else if .Stale}}stale{{else if .NotifyReached}}notify{{else}}ok{{end}}">
         <td class="name">{{.Name}}
           {{if ne .QuotaMode "off"}}<div class="sub" style="font-weight:400;font-size:0.6875rem;">ECS quota: {{.QuotaMode}}</div>{{end}}
@@ -264,6 +273,29 @@
             <span style="width:{{.BarWidth}}%"></span>
           </div>{{else}}—{{end}}</td>
         <td>
+          {{if eq .Activity.State "moved"}}
+            <span class="tnum">{{.Activity.ObjectsRate}}</span>
+            <div class="sub tnum" style="font-size:0.6875rem;">{{.Activity.BytesRate}}</div>
+          {{else if eq .Activity.State "idle"}}
+            <span class="sub" title="ECS republished metering and nothing moved since the last observation">idle</span>
+          {{else if eq .Activity.State "unrefreshed"}}
+            <span class="sub" title="ECS has not advanced uptodate_till since the last observation, so this repeats the previous window">no new metering</span>
+          {{else if eq .Activity.State "unchanged"}}
+            <span class="sub" title="ECS reports no uptodate_till for this bucket, so a quiet bucket and an unrefreshed one look identical">no change observed</span>
+          {{else}}
+            <span class="sub" title="Needs two metering observations to diff">—</span>
+          {{end}}
+          {{if .Activity.HasMPU}}<div style="margin-top:0.25rem;"><span class="badge mpu" title="Incomplete multipart upload in flight: parts are not objects yet">{{.Activity.MPUParts}} mpu parts</span></div>{{end}}
+        </td>
+        <td>
+          {{if ge .Activity.ObservedHours 1}}
+            <span class="tnum" title="Hours with movement over hours actually measured in the window">{{.Activity.Busy}}</span>
+            {{if .Activity.Hot}}<div style="margin-top:0.25rem;"><span class="badge hot" title="Movement in at least half of the measured hours">always busy</span></div>{{end}}
+          {{else}}
+            <span class="sub" title="No measured hour in the window yet">—</span>
+          {{end}}
+        </td>
+        <td>
           {{if .ConfirmedOver}}<span class="badge over"><span class="dot dot-bad"></span> over quota</span>
           {{else if .AtQuota}}<span class="badge atquota"><span class="dot dot-warn"></span> at quota</span>
           {{else if .Stale}}<span class="badge stale"><span class="dot dot-warn"></span> stale sample</span>
@@ -272,7 +304,7 @@
         </td>
       </tr>
     {{else}}
-      <tr class="empty-row"><td colspan="8" class="sub">No buckets in the last poll yet.</td></tr>
+      <tr class="empty-row"><td colspan="10" class="sub">No buckets in the last poll yet.</td></tr>
     {{end}}
     </tbody>
   </table>
@@ -286,6 +318,23 @@
     quota-off buckets and namespaces show Unlimited. Default block is the
     namespace default_bucket_block_size new buckets inherit. No quotas are
     operator-set here — bucket and namespace limits live in the ECS UI.
+    <br>
+    Activity and Busy are <strong>derived</strong>, not measured: ECS namespace
+    billing reports no request counters, so they are the change in objects,
+    bytes and in-flight multipart parts between two metering observations.
+    {{if .HasNamespaceMetering}}ECS reports this namespace's metering as current
+    only to {{.NamespaceMeteringAsOf.UTC.Format "2006-01-02 15:04 UTC"}}
+    ({{age .NamespaceMeteringAsOf .Now}} ago), so a rate below says when
+    <em>this tool observed</em> a change, not when the activity happened.{{end}}
+    Deltas are net — overwrite-in-place and write-then-delete both look like
+    zero — and <strong>read traffic is invisible</strong>: a bucket serving
+    heavy GET load with no writes shows as idle. Busy {{.ActivityWindow}} counts
+    hours with movement over hours this tool actually measured, so a low
+    denominator means little evidence either way. When ECS reports
+    <code>uptodate_till</code>, "no new metering" means it has not republished
+    since the last observation. When it does not, the cell reads "no change
+    observed", because an idle bucket and an unrefreshed one are then
+    indistinguishable — such a poll still counts as a measured hour.
   </footer>
 </div>
 
@@ -332,7 +381,7 @@
       if (noMatch) { noMatch.remove(); noMatch = null; }
       if (rows.length > 0 && visible.length === 0) {
         noMatch = document.createElement('tr');
-        noMatch.innerHTML = '<td colspan="8" class="sub">No buckets match your search.</td>';
+        noMatch.innerHTML = '<td colspan="10" class="sub">No buckets match your search.</td>';
         tbody.appendChild(noMatch);
       }
     }

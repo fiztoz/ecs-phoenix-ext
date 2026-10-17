@@ -34,6 +34,7 @@ type BucketState struct {
 	UsedBytes        int64
 	Objects          int64
 	MPUBytes         int64
+	MPUParts         int64  // in-flight incomplete multipart parts
 	QuotaBytes       *int64 // nil when no quota is set
 	UsedPercent      *float64
 	BlockSize        *int64 // nil when unset or not yet reported
@@ -45,16 +46,28 @@ type BucketState struct {
 	AtQuota          bool // used >= quota: ECS rejects further writes
 	OverStreak       int
 	ConfirmedOver    bool
+	// Activity is derived write-side movement. See Activity: ECS billing
+	// carries no request counters, so reads never appear in it.
+	Activity Activity
 }
 
 // Snapshot is the poller's last observation.
 type Snapshot struct {
-	Namespace              string
-	PolledAt               time.Time
-	PollOK                 bool
-	LastError              string
-	NamespaceBytes         int64
-	NamespaceObjects       int64
+	Namespace        string
+	PolledAt         time.Time
+	PollOK           bool
+	LastError        string
+	NamespaceBytes   int64
+	NamespaceObjects int64
+	// NamespaceUptodateTill is the namespace-level marker ECS publishes with
+	// the billing payload: metering is claimed current up to this instant.
+	// Display only. It is deliberately NOT used to gate derived activity or
+	// the per-bucket stale flag, because clusters exist where it lags wall
+	// clock by days while per-bucket counters keep moving — trusting it there
+	// would record no activity at all. Zero when ECS omits it. Not persisted:
+	// every successful poll republishes it, so it reads "—" until the first
+	// poll after a restart.
+	NamespaceUptodateTill  time.Time
 	NamespaceQuotaBytes    *int64 // nil when no namespace quota is set
 	NamespaceUsedPercent   *float64
 	NamespaceAtQuota       bool
@@ -77,6 +90,9 @@ type Snapshot struct {
 	// flips PollOK, it only sets InventoryError.
 	InventoryOK    bool
 	InventoryError string
+	// ActivityWindow is the rolling lookback behind each bucket's
+	// BusyHours/ObservedHours counters, so the UI can label them.
+	ActivityWindow time.Duration
 	Buckets        []BucketState
 }
 
@@ -91,21 +107,30 @@ type Poller struct {
 	// now is injectable for tests.
 	now func() time.Time
 
-	mu   sync.RWMutex
-	snap Snapshot
+	mu                sync.RWMutex
+	snap              Snapshot
+	activityWindow    time.Duration
+	activityRetention time.Duration
+	// baselines holds, per bucket, the observation current rates are diffed
+	// against. It only advances when ECS metering advanced, and it is seeded
+	// from durable state so a restart does not lose the diff window.
+	baselines map[string]baseline
 }
 
 // New builds a Poller. The snapshot is seeded from durable store state so a
 // restart does not forget a confirmed over-quota alarm.
 func New(ctx context.Context, client BillingSource, st store.Store, namespace string, interval time.Duration, log *slog.Logger) *Poller {
 	p := &Poller{
-		client:    client,
-		store:     st,
-		namespace: namespace,
-		interval:  interval,
-		log:       log,
-		now:       time.Now,
-		snap:      Snapshot{Namespace: namespace, PollOK: false},
+		client:            client,
+		store:             st,
+		namespace:         namespace,
+		interval:          interval,
+		log:               log,
+		now:               time.Now,
+		snap:              Snapshot{Namespace: namespace, PollOK: false, ActivityWindow: DefaultActivityWindow},
+		activityWindow:    DefaultActivityWindow,
+		activityRetention: DefaultActivityRetention,
+		baselines:         map[string]baseline{},
 	}
 	rows, err := st.States(ctx)
 	if err != nil {
@@ -117,6 +142,31 @@ func New(ctx context.Context, client BillingSource, st store.Store, namespace st
 	}
 	p.seedFromState(rows, ns)
 	return p
+}
+
+// SetActivityWindow configures the rolling lookback and the history retention
+// for derived activity. Both are floored rather than rejected so a bad value
+// degrades to safe behaviour; config validation is the place that errors.
+// Call before Run.
+func (p *Poller) SetActivityWindow(window, retention time.Duration) {
+	if window < time.Hour {
+		window = DefaultActivityWindow
+	}
+	if retention < window {
+		retention = window
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.activityWindow = window
+	p.activityRetention = retention
+	p.snap.ActivityWindow = window
+}
+
+// ActivityWindow is the configured lookback behind BusyHours/ObservedHours.
+func (p *Poller) ActivityWindow() time.Duration {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.activityWindow
 }
 
 func applySeededLimit(dst **int64, known *bool, src store.ObservedLimit) {
@@ -144,12 +194,22 @@ func (p *Poller) seedFromState(rows []store.StateRow, ns []store.NamespaceState)
 			UsedBytes:     r.UsedBytes,
 			Objects:       r.Objects,
 			MPUBytes:      r.MPUBytes,
+			MPUParts:      r.MPUParts,
 			OverStreak:    r.OverStreak,
 			ConfirmedOver: r.ConfirmedOver,
 			Stale:         true, // until a fresh sample proves otherwise
 		}
 		if r.UptodateTill != nil {
 			b.UptodateTill = *r.UptodateTill
+		}
+		// The durable observation is also the activity baseline, so the first
+		// poll after a restart still diffs against real previous values.
+		p.baselines[r.Bucket] = baseline{
+			at:        r.PolledAt,
+			objects:   r.Objects,
+			usedBytes: r.UsedBytes,
+			mpuParts:  r.MPUParts,
+			uptodate:  b.UptodateTill,
 		}
 		applySeededLimit(&b.BlockSize, &b.BlockKnown, r.Block)
 		if b.BlockKnown && b.BlockSize != nil {
@@ -225,6 +285,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	}
 
 	prev, nsPrevStreak, nsPrevConfirmed, prevDefault, prevBlock, prevNotify := p.carried()
+	bases, actWindow, actRetention := p.takeBaselines()
 	th := p.StaleThreshold()
 
 	// Bucket and namespace quotas are ECS-native. Each inventory endpoint is
@@ -235,6 +296,8 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	invOK := bucketsOK && nsOK
 
 	buckets := make([]BucketState, 0, len(payload.Buckets))
+	newBases := make(map[string]baseline, len(payload.Buckets))
+	deltas := make([]store.ActivityDelta, 0, len(payload.Buckets))
 	for _, b := range payload.Buckets {
 		var qp, block, notify *int64
 		blockKnown, notifyKnown := false, false
@@ -266,12 +329,48 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		streak, confirmed := quota.Advance(c.streak, c.confirmed, bucketsOK, blockKnown, qp, b.UsedBytes)
 
 		uptodate := b.UptodateTill.UTC()
+		obs := observation{
+			objects:   b.Objects,
+			usedBytes: b.UsedBytes,
+			mpuParts:  b.MPUParts,
+			uptodate:  uptodate,
+		}
+		base := bases[b.Name]
+		act := computeActivity(base, obs, now)
+		switch {
+		case !base.usable():
+			// First observation of this bucket: adopt it as the diff baseline.
+			newBases[b.Name] = obs.asBaseline(now)
+		case act.proven():
+			// ECS republished metering, or a counter moved: these values are
+			// current as of now, so they become the next diff baseline.
+			newBases[b.Name] = obs.asBaseline(now)
+		default:
+			// Nothing proves the values are newer than the baseline: hold it,
+			// so the next real change is rated over the whole quiet stretch
+			// instead of the last poll interval.
+			newBases[b.Name] = base
+		}
+		if act.recordable() {
+			deltas = append(deltas, store.ActivityDelta{
+				Namespace:   p.namespace,
+				Bucket:      b.Name,
+				HourBucket:  store.HourBucket(now),
+				ObjectsUp:   positive(act.ObjectsDelta),
+				ObjectsDown: positive(-act.ObjectsDelta),
+				BytesUp:     positive(act.BytesDelta),
+				BytesDown:   positive(-act.BytesDelta),
+				MPUPartsMax: act.MPUParts,
+				Active:      act.moving(),
+			})
+		}
 		bs := BucketState{
 			Name:             b.Name,
 			Namespace:        p.namespace,
 			UsedBytes:        b.UsedBytes,
 			Objects:          b.Objects,
 			MPUBytes:         b.MPUBytes,
+			MPUParts:         b.MPUParts,
 			QuotaBytes:       qp,
 			BlockSize:        block,
 			BlockKnown:       blockKnown,
@@ -282,6 +381,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 			AtQuota:          qp != nil && b.UsedBytes >= *qp,
 			OverStreak:       streak,
 			ConfirmedOver:    confirmed,
+			Activity:         act,
 		}
 		if qp != nil && *qp > 0 {
 			pct := float64(b.UsedBytes) / float64(*qp) * 100
@@ -339,6 +439,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 			UsedBytes:     bs.UsedBytes,
 			Objects:       bs.Objects,
 			MPUBytes:      bs.MPUBytes,
+			MPUParts:      bs.MPUParts,
 			UptodateTill:  &uptodate,
 			PolledAt:      now,
 			OverStreak:    bs.OverStreak,
@@ -365,6 +466,11 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		p.log.Error("poller: persist state failed", "err", err)
 	}
 
+	// Derived activity is best-effort, like inventory: a store failure here
+	// never flips PollOK, it only leaves the window counters at zero.
+	p.recordActivity(ctx, deltas, buckets, now, actWindow, actRetention)
+	p.setBaselines(newBases)
+
 	p.mu.Lock()
 	p.snap = Snapshot{
 		Namespace:                 p.namespace,
@@ -373,6 +479,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		LastError:                 "",
 		NamespaceBytes:            payload.NamespaceBytes,
 		NamespaceObjects:          payload.NamespaceObjects,
+		NamespaceUptodateTill:     payload.UptodateTill.UTC(),
 		NamespaceQuotaBytes:       nsQuotaBytes,
 		NamespaceUsedPercent:      nsPct,
 		NamespaceAtQuota:          nsAtQuota,
@@ -386,6 +493,7 @@ func (p *Poller) pollOnce(ctx context.Context) {
 		NamespaceNotifyKnown:      nsNotifyKnown,
 		InventoryOK:               invOK,
 		InventoryError:            invErr,
+		ActivityWindow:            actWindow,
 		Buckets:                   buckets,
 	}
 	p.mu.Unlock()
@@ -463,6 +571,71 @@ func (p *Poller) carried() (buckets map[string]carriedBucket, nsStreak int, nsCo
 		carriedLimit{known: p.snap.NamespaceDefaultKnown, bytes: cloneI64(p.snap.NamespaceDefaultBlock)},
 		carriedLimit{known: p.snap.NamespaceBlockKnown, bytes: cloneI64(p.snap.NamespaceBlockSize)},
 		carriedLimit{known: p.snap.NamespaceNotifyKnown, bytes: cloneI64(p.snap.NamespaceNotificationSize)}
+}
+
+// recordActivity folds this poll's diffs into the hourly history, reads the
+// rolling window back, and stamps BusyHours/ObservedHours/Hot on each bucket.
+// Every failure is logged and swallowed: derived activity must never affect
+// billing truth, quota hysteresis or health.
+func (p *Poller) recordActivity(ctx context.Context, deltas []store.ActivityDelta, buckets []BucketState,
+	now time.Time, window, retention time.Duration) {
+	if len(deltas) > 0 {
+		if err := p.store.RecordActivity(ctx, deltas); err != nil {
+			p.log.Warn("poller: record activity failed", "err", err)
+		}
+	}
+	// Aligned to the hour boundary, so the window covers at least `window`
+	// and always includes the hour in progress.
+	hours, herr := p.store.ActivityHours(ctx, p.namespace, store.HourBucket(now.Add(-window)))
+	if herr != nil {
+		p.log.Warn("poller: activity window query failed", "err", herr)
+	} else {
+		sum := store.SummarizeHours(hours)
+		for i := range buckets {
+			s, ok := sum[buckets[i].Name]
+			if !ok {
+				continue
+			}
+			buckets[i].Activity.BusyHours = s.BusyHours
+			buckets[i].Activity.ObservedHours = s.ObservedHours
+			buckets[i].Activity.Hot = isHot(s.BusyHours, s.ObservedHours)
+		}
+	}
+	if n, perr := p.store.PruneActivity(ctx, now.Add(-retention)); perr != nil {
+		p.log.Warn("poller: activity prune failed", "err", perr)
+	} else if n > 0 {
+		p.log.Info("poller: pruned activity history", "rows", n)
+	}
+}
+
+// takeBaselines copies the diff baselines and the activity configuration under
+// one read lock, so a concurrent SetActivityWindow cannot tear the pair.
+func (p *Poller) takeBaselines() (map[string]baseline, time.Duration, time.Duration) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[string]baseline, len(p.baselines))
+	for k, v := range p.baselines {
+		out[k] = v
+	}
+	return out, p.activityWindow, p.activityRetention
+}
+
+// setBaselines replaces the baselines with the ones this poll produced.
+// Buckets absent from a complete poll lose their baseline: they are gone from
+// the namespace snapshot, and their hourly history ages out on its own.
+func (p *Poller) setBaselines(next map[string]baseline) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.baselines = next
+}
+
+// positive clamps a signed delta to its non-negative half, so ingest and
+// deletion are stored separately instead of cancelling out.
+func positive(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 // Snapshot returns a copy of the current snapshot.
