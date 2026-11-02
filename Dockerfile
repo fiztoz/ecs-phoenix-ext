@@ -7,7 +7,8 @@ ENV CGO_ENABLED=0
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -trimpath -ldflags="-s -w" -o /out/ecs-phoenix-ext ./cmd/ecs-phoenix-ext
+ARG VERSION=dev
+RUN go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/ecs-phoenix-ext ./cmd/ecs-phoenix-ext
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/ecs-phoenix-ext /ecs-phoenix-ext

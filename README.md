@@ -216,7 +216,7 @@ extensions:
   - id: ecs-phoenix-ext
     title: Storage
     path: /storage
-    image: ghcr.io/fiztoz/ecs-phoenix-ext:0.3.0
+    image: ghcr.io/fiztoz/ecs-phoenix-ext:0.4.0
     port: 80
     readinessPath: /health/live
     database:
@@ -345,11 +345,11 @@ GHCR on every push to `main` and on version tags:
 | Ref | Tags |
 |---|---|
 | `main` | `:dev`, `:sha-<short>` |
-| `v0.3.0` | `:0.3.0`, `:0.3`, `:latest` |
+| `v0.4.0` | `:0.4.0`, `:0.4`, `:latest` |
 
 ```bash
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 After the first successful publish, make the package public once:
