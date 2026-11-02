@@ -77,6 +77,17 @@ type dashboardData struct {
 	// poll time because the two can be days apart.
 	NamespaceMeteringAsOf time.Time
 	HasNamespaceMetering  bool
+	// API drives the "API & MCP" usage guide.
+	API apiGuide
+}
+
+// apiGuide says which access paths the guide should document. It carries
+// only whether credentials are configured, never their values.
+type apiGuide struct {
+	ExtensionID string
+	ViaPhoenix  bool // PHOENIX_IDENTITY_SECRET set: the Phoenix gateway path works
+	DirectToken bool // UI_TOKEN set: direct calls need it
+	DirectOpen  bool // neither set: direct calls are unauthenticated
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +113,12 @@ func (s *Server) buildDashboard(r *http.Request) dashboardData {
 		NamespaceObjects:   snap.NamespaceObjects,
 		Flash:              r.URL.Query().Get("msg"),
 		ActivityWindow:     shortDuration(snap.ActivityWindow),
+		API: apiGuide{
+			ExtensionID: s.deps.ExtensionID,
+			ViaPhoenix:  s.deps.Identity != nil,
+			DirectToken: s.deps.UIToken != "",
+			DirectOpen:  s.deps.Identity == nil && s.deps.UIToken == "",
+		},
 	}
 	if !snap.NamespaceUptodateTill.IsZero() {
 		data.HasNamespaceMetering = true

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="300">
+<noscript><meta http-equiv="refresh" content="300"></noscript>
 <title>ECS Storage — {{.Namespace}}</title>
 <link rel="icon" href="{{.BasePath}}/icon.svg" type="image/svg+xml">
 <style>
@@ -155,6 +155,53 @@
   *::-webkit-scrollbar-thumb { background-color:oklch(1 0 0 / 0.1); border-radius:999px;
                                border:2px solid transparent; background-clip:content-box; }
   *::-webkit-scrollbar-thumb:hover { background-color:oklch(1 0 0 / 0.18); }
+
+  /* API & MCP usage guide */
+  .btn-guide { font:inherit; cursor:pointer; }
+  dialog.guide { width:min(46rem, calc(100vw - 2rem)); max-height:calc(100vh - 2rem); padding:0;
+                 background:var(--surface); color:var(--fg); border:1px solid var(--border);
+                 border-radius:var(--radius); box-shadow:0 24px 64px oklch(0 0 0 / 0.5); }
+  dialog.guide::backdrop { background:oklch(0 0 0 / 0.6); backdrop-filter:blur(2px); }
+  .guide-head { position:sticky; top:0; z-index:1; display:flex; align-items:center; gap:0.75rem;
+                padding:1rem 1.25rem; background:var(--surface); border-bottom:1px solid var(--border); }
+  .guide-head h2 { margin:0; font-size:1rem; font-weight:600; flex:1; }
+  .guide-close { background:none; border:1px solid transparent; color:var(--muted-fg); cursor:pointer;
+                 width:2rem; height:2rem; border-radius:0.5rem; font-size:1.25rem; line-height:1; }
+  .guide-close:hover { color:var(--fg); border-color:var(--border); background:var(--elevated); }
+  .guide-tabs { display:flex; gap:0.25rem; padding:0.75rem 1.25rem 0; border-bottom:1px solid var(--border);
+                overflow-x:auto; }
+  .guide-tabs button { font:inherit; font-size:0.8125rem; color:var(--muted-fg); background:none; border:0;
+                       border-bottom:2px solid transparent; padding:0.5rem 0.75rem; cursor:pointer; white-space:nowrap; }
+  .guide-tabs button[aria-selected="true"] { color:var(--fg); border-bottom-color:var(--primary); }
+  .guide-tabs button:focus-visible, .guide-close:focus-visible, .copy:focus-visible {
+                       outline:2px solid var(--ring); outline-offset:2px; }
+  .guide-body { padding:1rem 1.25rem 1.5rem; font-size:0.875rem; line-height:1.55; }
+  .guide-body h3 { font-size:0.8125rem; font-weight:600; margin:1.25rem 0 0.5rem; color:var(--fg); }
+  .guide-body h3:first-child { margin-top:0.25rem; }
+  .guide-body p, .guide-body ul { margin:0 0 0.625rem; color:var(--muted-fg); }
+  .guide-body ul { padding-left:1.125rem; }
+  .guide-body strong { color:var(--fg); font-weight:600; }
+  .guide-body code { font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace; font-size:0.8125em;
+                     color:var(--fg); background:var(--muted); padding:0.05rem 0.3rem; border-radius:0.3rem; }
+  .snippet { position:relative; margin:0 0 0.75rem; }
+  .snippet pre { margin:0; padding:0.75rem 4.25rem 0.75rem 0.875rem; background:var(--bg); border:1px solid var(--border);
+                 border-radius:0.5rem; overflow-x:auto; font-size:0.78rem; line-height:1.5; color:var(--fg);
+                 font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace; white-space:pre; }
+  .copy { position:absolute; top:0.4rem; right:0.4rem; font:inherit; font-size:0.72rem; color:var(--muted-fg);
+          background:var(--elevated); border:1px solid var(--border); border-radius:0.375rem;
+          padding:0.2rem 0.5rem; cursor:pointer; }
+  .copy:hover { color:var(--fg); border-color:var(--primary); }
+  .access { border:1px solid var(--border); border-radius:0.5rem; padding:0.75rem 0.875rem; margin:0 0 0.75rem;
+            background:var(--card); }
+  .access .tag { display:inline-block; font-size:0.7rem; font-weight:600; letter-spacing:0.03em; text-transform:uppercase;
+                 padding:0.1rem 0.45rem; border-radius:999px; margin-left:0.375rem; vertical-align:1px; }
+  .tag.ok { color:var(--success); background:oklch(0.74 0.17 155 / 0.12); }
+  .tag.warn { color:var(--warning); background:oklch(0.8 0.16 80 / 0.12); }
+  .guide-table { width:100%; min-width:0; border-collapse:collapse; margin:0 0 0.75rem; font-size:0.8125rem; }
+  .guide-table td, .guide-table th { padding:0.4rem 0.5rem; border-bottom:1px solid var(--border); vertical-align:top;
+                                     text-align:left; }
+  .guide-table td:first-child { white-space:nowrap; }
+  [role="tabpanel"][hidden] { display:none; }
 </style>
 </head>
 <body>
@@ -180,6 +227,14 @@
         </svg>
         Wallboard
       </a>
+      <button type="button" class="btn-wallboard btn-guide" id="guide-open" aria-haspopup="dialog">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="16 18 22 12 16 6"/>
+          <polyline points="8 6 2 12 8 18"/>
+        </svg>
+        API &amp; MCP
+      </button>
     </div>
   </header>
 
@@ -338,6 +393,147 @@
   </footer>
 </div>
 
+<dialog class="guide" id="guide" aria-labelledby="guide-title">
+  <div class="guide-head">
+    <h2 id="guide-title">API &amp; MCP guide</h2>
+    <button type="button" class="guide-close" id="guide-close" aria-label="Close">&times;</button>
+  </div>
+  <div class="guide-tabs" role="tablist">
+    <button type="button" role="tab" id="tab-mcp" aria-controls="panel-mcp" aria-selected="true">AI assistant (MCP)</button>
+    <button type="button" role="tab" id="tab-rest" aria-controls="panel-rest" aria-selected="false" tabindex="-1">REST API</button>
+    <button type="button" role="tab" id="tab-access" aria-controls="panel-access" aria-selected="false" tabindex="-1">Access</button>
+    <button type="button" role="tab" id="tab-data" aria-controls="panel-data" aria-selected="false" tabindex="-1">What the numbers mean</button>
+  </div>
+  <div class="guide-body">
+    <section role="tabpanel" id="panel-mcp" aria-labelledby="tab-mcp">
+      <p>Ask an AI assistant about this namespace in plain language. Everything is
+        <strong>read-only</strong>: answers come from this dashboard's last poll, and nothing you ask ever reaches ECS.</p>
+
+      <h3>1. Pick your endpoint</h3>
+      {{if .API.ViaPhoenix}}
+      <div class="access">
+        <strong>Through Phoenix</strong><span class="tag ok">per-user</span>
+        <p>Use your own Phoenix API key. An admin must grant you access to this extension.</p>
+        <div class="snippet"><pre data-copy><span class="origin">https://&lt;phoenix-host&gt;</span>/api/extensions/{{.API.ExtensionID}}/call/mcp</pre></div>
+      </div>
+      {{end}}
+      {{if .API.DirectToken}}
+      <div class="access">
+        <strong>Direct</strong><span class="tag warn">shared token</span>
+        <p>Uses this extension's UI token. Ask your Phoenix admin for it; everyone using it shares the same read access.</p>
+        <div class="snippet"><pre data-copy><span class="origin">https://&lt;phoenix-host&gt;</span>{{.BasePath}}/mcp</pre></div>
+      </div>
+      {{end}}
+      {{if .API.DirectOpen}}
+      <div class="access">
+        <strong>Direct</strong><span class="tag warn">open</span>
+        <p>No credentials are configured, so anyone who can reach this page can call it.</p>
+        <div class="snippet"><pre data-copy><span class="origin">https://&lt;phoenix-host&gt;</span>{{.BasePath}}/mcp</pre></div>
+      </div>
+      {{end}}
+
+      <h3>2. Add it to your client</h3>
+      <p><strong>Claude Code</strong>: put the key in an environment variable first, so it does not land in your shell history.</p>
+      {{if .API.ViaPhoenix}}
+      <div class="snippet"><pre data-copy>claude mcp add --transport http ecs \
+  <span class="origin">https://&lt;phoenix-host&gt;</span>/api/extensions/{{.API.ExtensionID}}/call/mcp \
+  --header "Authorization: ApiKey $PHOENIX_API_KEY"</pre></div>
+      {{else if .API.DirectToken}}
+      <div class="snippet"><pre data-copy>claude mcp add --transport http ecs \
+  <span class="origin">https://&lt;phoenix-host&gt;</span>{{.BasePath}}/mcp \
+  --header "Authorization: Bearer $ECS_UI_TOKEN"</pre></div>
+      {{else}}
+      <div class="snippet"><pre data-copy>claude mcp add --transport http ecs <span class="origin">https://&lt;phoenix-host&gt;</span>{{.BasePath}}/mcp</pre></div>
+      {{end}}
+      <p><strong>Other clients</strong> (<code>.mcp.json</code> and similar): an HTTP server entry.</p>
+      <div class="snippet"><pre data-copy>{
+  "mcpServers": {
+    "ecs": {
+      "type": "http",
+      "url": "<span class="origin">https://&lt;phoenix-host&gt;</span>{{if .API.ViaPhoenix}}/api/extensions/{{.API.ExtensionID}}/call/mcp{{else}}{{.BasePath}}/mcp{{end}}"{{if or .API.ViaPhoenix .API.DirectToken}},
+      "headers": { "Authorization": "{{if .API.ViaPhoenix}}ApiKey ${PHOENIX_API_KEY}{{else}}Bearer ${ECS_UI_TOKEN}{{end}}" }{{end}}
+    }
+  }
+}</pre></div>
+
+      <h3>3. Ask</h3>
+      <ul>
+        <li>"Which buckets are closest to their Block Access threshold?"</li>
+        <li>"Which buckets have been writing the most over the last 24 hours?"</li>
+        <li>"Show me the hourly activity for <em>bucket-name</em> this week."</li>
+      </ul>
+
+      <h3>Tools</h3>
+      <table class="guide-table">
+        <tr><td><code>ecs_namespace_summary</code></td><td>Namespace usage, quota, poll health and bucket counts. Start here.</td></tr>
+        <tr><td><code>ecs_list_buckets</code></td><td>Buckets, sortable by name, used, objects, used_percent or activity. Filters: prefix, at quota, hot.</td></tr>
+        <tr><td><code>ecs_get_bucket</code></td><td>One bucket in full.</td></tr>
+        <tr><td><code>ecs_bucket_activity_history</code></td><td>Hourly write activity for one bucket.</td></tr>
+      </table>
+    </section>
+
+    <section role="tabpanel" id="panel-rest" aria-labelledby="tab-rest" hidden>
+      <p>The same read-only data as JSON. Send the same header as for MCP{{if .API.ViaPhoenix}}. Through Phoenix, replace
+        <code>{{.BasePath}}</code> with <code>/api/extensions/{{.API.ExtensionID}}/call</code>{{end}}.</p>
+      <table class="guide-table">
+        <tr><td><code>GET {{.BasePath}}/api/v1/whoami</code></td><td>Who you are and your scopes. Use it to check access.</td></tr>
+        <tr><td><code>GET {{.BasePath}}/api/v1/namespace</code></td><td>Namespace usage, quota, poll health, bucket counts.</td></tr>
+        <tr><td><code>GET {{.BasePath}}/api/v1/buckets</code></td><td>Buckets. Query: <code>sort</code> (name, used, objects, used_percent, activity), <code>prefix</code>, <code>at_quota=true</code>, <code>hot=true</code>, <code>limit</code> (1–1000).</td></tr>
+        <tr><td><code>GET {{.BasePath}}/api/v1/buckets/{bucket}</code></td><td>One bucket; 404 if unknown.</td></tr>
+        <tr><td><code>GET {{.BasePath}}/api/v1/buckets/{bucket}/activity</code></td><td>Hourly activity. Query: <code>hours</code> (1–2160, default 24).</td></tr>
+      </table>
+      <h3>Example: ten biggest buckets</h3>
+      {{if .API.ViaPhoenix}}
+      <div class="snippet"><pre data-copy>curl -H "Authorization: ApiKey $PHOENIX_API_KEY" \
+  "<span class="origin">https://&lt;phoenix-host&gt;</span>/api/extensions/{{.API.ExtensionID}}/call/api/v1/buckets?sort=used&amp;limit=10"</pre></div>
+      {{else if .API.DirectToken}}
+      <div class="snippet"><pre data-copy>curl -H "Authorization: Bearer $ECS_UI_TOKEN" \
+  "<span class="origin">https://&lt;phoenix-host&gt;</span>{{.BasePath}}/api/v1/buckets?sort=used&amp;limit=10"</pre></div>
+      {{else}}
+      <div class="snippet"><pre data-copy>curl "<span class="origin">https://&lt;phoenix-host&gt;</span>{{.BasePath}}/api/v1/buckets?sort=used&amp;limit=10"</pre></div>
+      {{end}}
+      <p>Errors are JSON: <code>{"error": "…"}</code> with 400 (bad query), 401 (no or bad credentials), 403 (missing scope) or 404.</p>
+    </section>
+
+    <section role="tabpanel" id="panel-access" aria-labelledby="tab-access" hidden>
+      <h3>How access is decided</h3>
+      <ul>
+        {{if .API.ViaPhoenix}}
+        <li><strong>Through Phoenix</strong> (enabled): Phoenix checks your API key and your grant for this extension, then
+          tells the extension who you are. Each person gets their own access, an admin can revoke it, and every call is logged under your name.</li>
+        {{else}}
+        <li><strong>Through Phoenix</strong>: not enabled here. Per-user access needs the Phoenix extension gateway and
+          <code>PHOENIX_IDENTITY_SECRET</code> on this extension.</li>
+        {{end}}
+        {{if .API.DirectToken}}
+        <li><strong>Direct</strong>: the shared UI token grants read access. Anyone holding it looks the same in the logs.</li>
+        {{else if .API.DirectOpen}}
+        <li><strong>Direct</strong>: open. No UI token is configured.</li>
+        {{else}}
+        <li><strong>Direct</strong>: refused. Only calls that come through Phoenix are accepted.</li>
+        {{end}}
+      </ul>
+      <h3>Getting access</h3>
+      <p>Phoenix admins grant access per user and per extension; you cannot grant it to yourself. Once you have a grant,
+        create an API key in Phoenix (or ask an admin to) and pick only the scopes you need.</p>
+      <p>Check what you have with <code>GET {{.BasePath}}/api/v1/whoami</code> or by asking the assistant to list its tools.</p>
+    </section>
+
+    <section role="tabpanel" id="panel-data" aria-labelledby="tab-data" hidden>
+      <ul>
+        <li><strong>Freshness</strong>: data is from the last poll, not live. <code>poll_ok: false</code> means you are
+          seeing the last good poll; check <code>polled_at</code> and <code>last_error</code>.</li>
+        <li><strong>Sizes</strong> are bytes. ECS "GB" thresholds are binary (GiB).</li>
+        <li><strong>Quota</strong>: <code>block_size</code> is the Block Access threshold (ECS rejects writes at or above it);
+          <code>notification_size</code> only alerts. <code>quota_mode: off</code> means unlimited.</li>
+        <li><strong>Activity is derived</strong> from changes between polls: write-side, net movement only.
+          <strong>Reads are invisible</strong>, so a bucket serving heavy GET traffic looks idle.</li>
+        <li><code>activity: null</code> means there is no baseline yet, not zero activity.</li>
+      </ul>
+    </section>
+  </div>
+</dialog>
+
 <script>
   (function () {
     var tbody = document.getElementById('buckets');
@@ -400,6 +596,78 @@
 
     if (search) search.addEventListener('input', apply);
     apply();
+  })();
+</script>
+<script>
+  (function () {
+    var dlg = document.getElementById('guide');
+    var openBtn = document.getElementById('guide-open');
+    if (!dlg || !openBtn || typeof dlg.showModal !== 'function') {
+      if (openBtn) openBtn.hidden = true;
+    } else {
+      var origin = window.location.origin;
+      Array.prototype.forEach.call(dlg.querySelectorAll('.origin'), function (el) { el.textContent = origin; });
+
+      openBtn.addEventListener('click', function () { dlg.showModal(); });
+      // #api-guide opens the guide directly, so it can be linked.
+      if (window.location.hash === '#api-guide') dlg.showModal();
+      document.getElementById('guide-close').addEventListener('click', function () { dlg.close(); });
+      // Click on the backdrop (outside the dialog box) closes it.
+      dlg.addEventListener('click', function (e) {
+        var r = dlg.getBoundingClientRect();
+        if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) dlg.close();
+      });
+
+      var tabs = Array.prototype.slice.call(dlg.querySelectorAll('[role="tab"]'));
+      function select(tab) {
+        tabs.forEach(function (t) {
+          var on = t === tab;
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+          t.tabIndex = on ? 0 : -1;
+          document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+        });
+        tab.focus();
+      }
+      tabs.forEach(function (t, i) {
+        t.addEventListener('click', function () { select(t); });
+        t.addEventListener('keydown', function (e) {
+          if (e.key === 'ArrowRight') { e.preventDefault(); select(tabs[(i + 1) % tabs.length]); }
+          if (e.key === 'ArrowLeft') { e.preventDefault(); select(tabs[(i - 1 + tabs.length) % tabs.length]); }
+        });
+      });
+
+      Array.prototype.forEach.call(dlg.querySelectorAll('pre[data-copy]'), function (pre) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'copy';
+        btn.textContent = 'Copy';
+        btn.addEventListener('click', function () {
+          var text = pre.textContent;
+          var done = function (ok) {
+            btn.textContent = ok ? 'Copied' : 'Select & copy';
+            setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () { done(true); }, function () { selectText(pre); done(false); });
+          } else { selectText(pre); done(false); }
+        });
+        pre.parentNode.appendChild(btn);
+      });
+      function selectText(el) {
+        var range = document.createRange();
+        range.selectNodeContents(el);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    }
+
+    // Refresh every 5 minutes like before, but never under an open guide.
+    function refresh() {
+      if (dlg && dlg.open) { setTimeout(refresh, 30000); return; }
+      window.location.reload();
+    }
+    setTimeout(refresh, 300000);
   })();
 </script>
 </body>

@@ -13,6 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fiztoz/ecs-phoenix-ext/internal/identity"
+	"github.com/fiztoz/ecs-phoenix-ext/internal/mcp"
+	"github.com/fiztoz/ecs-phoenix-ext/internal/ops"
 	"github.com/fiztoz/ecs-phoenix-ext/internal/poller"
 	"github.com/fiztoz/ecs-phoenix-ext/internal/store"
 )
@@ -31,9 +34,17 @@ type Deps struct {
 	Namespace string
 	BasePath  string // e.g. "/storage"; "/" for local dev
 	UIToken   string // empty = UI open (health is always open)
-	Snapshots SnapshotSource
-	Store     store.Store
-	Log       *slog.Logger
+	// Identity verifies X-Phoenix-Identity from the Phoenix extension
+	// gateway; nil means the header is refused (PHOENIX_IDENTITY_SECRET
+	// unset). See callerAuth.
+	Identity *identity.Verifier
+	Version  string // reported as MCP serverInfo.version
+	// ExtensionID is this extension's id in Phoenix's catalog; the usage
+	// guide builds the gateway URL from it.
+	ExtensionID string
+	Snapshots   SnapshotSource
+	Store       store.Store
+	Log         *slog.Logger
 }
 
 // Server is the ecs-phoenix-ext HTTP server.
@@ -41,6 +52,8 @@ type Server struct {
 	deps Deps
 	tmpl *template.Template
 	icon []byte
+	ops  *ops.Service
+	mcp  *mcp.Server
 }
 
 // New parses templates and builds the server.
@@ -86,7 +99,13 @@ func New(deps Deps) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("http: read icon: %w", err)
 	}
-	return &Server{deps: deps, tmpl: tmpl, icon: icon}, nil
+	svc := &ops.Service{DefaultNamespace: deps.Namespace, Snapshots: deps.Snapshots, Store: deps.Store}
+	version := deps.Version
+	if version == "" {
+		version = "dev"
+	}
+	return &Server{deps: deps, tmpl: tmpl, icon: icon, ops: svc,
+		mcp: mcp.New(svc, deps.Log, "ecs-phoenix-ext", version)}, nil
 }
 
 // Handler returns the mux with routes registered under BASE_PATH and, when
@@ -115,6 +134,22 @@ func (s *Server) register(mux *http.ServeMux, prefix string) {
 	mux.HandleFunc("GET "+p+"/", s.securityHeaders(s.uiAuth(s.handleDashboard)))
 	mux.HandleFunc("GET "+p+"/wallboard", s.securityHeaders(s.uiAuth(s.handleWallboard)))
 	mux.HandleFunc("GET "+p+"/api/buckets", s.securityHeaders(s.uiAuth(s.handleAPIBuckets)))
+
+	// Programmatic API and MCP: per-caller scopes (see callerAuth).
+	read := func(h http.HandlerFunc) http.HandlerFunc {
+		return s.securityHeaders(s.callerAuth(identity.ScopeRead, h))
+	}
+	mux.HandleFunc("GET "+p+"/api/v1/whoami", read(s.handleV1WhoAmI))
+	mux.HandleFunc("GET "+p+"/api/v1/namespace", read(s.handleV1Namespace))
+	mux.HandleFunc("GET "+p+"/api/v1/buckets", read(s.handleV1Buckets))
+	mux.HandleFunc("GET "+p+"/api/v1/buckets/{bucket}", read(s.handleV1Bucket))
+	mux.HandleFunc("GET "+p+"/api/v1/buckets/{bucket}/activity", read(s.handleV1BucketActivity))
+	// MCP checks per-tool scopes itself; callerAuth only requires a caller.
+	// GET/DELETE reach the handler so it can answer the transport's 405.
+	mcpHandler := s.securityHeaders(s.callerAuth("", s.mcp.ServeHTTP))
+	for _, m := range []string{"POST", "GET", "DELETE"} {
+		mux.HandleFunc(m+" "+p+"/mcp", mcpHandler)
+	}
 }
 
 // securityHeaders sets the locked header set on every response.
@@ -274,173 +309,15 @@ func (s *Server) handleIcon(w http.ResponseWriter, _ *http.Request) {
 
 // --- JSON API ---
 
-type apiBucket struct {
-	Name             string     `json:"name"`
-	Namespace        string     `json:"namespace"`
-	UsedBytes        int64      `json:"used_bytes"`
-	Objects          int64      `json:"objects"`
-	MPUBytes         int64      `json:"mpu_bytes"`
-	MPUParts         int64      `json:"mpu_parts"`         // in-flight incomplete multipart parts
-	BlockSize        *int64     `json:"block_size"`        // null until inventory succeeds / when ECS quota off
-	NotificationSize *int64     `json:"notification_size"` // null until inventory succeeds / when ECS quota off
-	QuotaMode        string     `json:"quota_mode"`        // off | notify-only | block-only | block-notify (ECS-native)
-	QuotaBytes       *int64     `json:"quota_bytes"`       // null when unset
-	UsedPercent      *float64   `json:"used_percent"`
-	UptodateTill     *time.Time `json:"uptodate_till"` // null when ECS omitted metering freshness
-	Stale            bool       `json:"stale"`
-	AtQuota          bool       `json:"at_quota"`
-	OverStreak       int        `json:"over_streak"`
-	ConfirmedOver    bool       `json:"confirmed_over"`
-	// Activity is null until two comparable metering observations exist.
-	Activity *apiActivity `json:"activity"`
-}
-
-// apiActivity is derived write-side movement. ECS billing exposes no request
-// counters to a namespace-scoped management user, so these are deltas between
-// two metering observations: read traffic is invisible, and the deltas are net
-// (overwrite-in-place and write-then-delete both look like zero).
-type apiActivity struct {
-	Known bool `json:"known"`
-	// State is one of moved | idle | unrefreshed | unchanged. "unchanged"
-	// means ECS reports no uptodate_till for this bucket, so an idle bucket
-	// and one ECS has not republished yet cannot be told apart.
-	State             string  `json:"state"`
-	Changed           bool    `json:"changed"`
-	MeteringRefreshed bool    `json:"metering_refreshed"`       // ECS advanced uptodate_till
-	FreshnessKnown    bool    `json:"metering_freshness_known"` // uptodate_till present on both sides
-	WindowSeconds     float64 `json:"window_seconds"`
-	ObjectsDelta      int64   `json:"objects_delta"`
-	BytesDelta        int64   `json:"bytes_delta"`
-	ObjectsPerHour    float64 `json:"objects_per_hour"`
-	BytesPerHour      float64 `json:"bytes_per_hour"`
-	MPUParts          int64   `json:"mpu_parts"`
-	MPUPartsDelta     int64   `json:"mpu_parts_delta"`
-	BusyHours         int     `json:"busy_hours"`     // hours with movement inside the lookback
-	ObservedHours     int     `json:"observed_hours"` // hours with a usable metering observation
-	Hot               bool    `json:"hot"`            // movement in most observed hours
-}
-
-type apiResponse struct {
-	Namespace          string    `json:"namespace"`
-	PolledAt           time.Time `json:"polled_at"`
-	PollOK             bool      `json:"poll_ok"`
-	LastError          string    `json:"last_error"`
-	InventoryOK        bool      `json:"inventory_ok"`
-	InventoryError     string    `json:"inventory_error"`
-	NamespaceUsedBytes int64     `json:"namespace_used_bytes"`
-	NamespaceObjects   int64     `json:"namespace_objects"`
-	// NamespaceUptodateTill is ECS's own claim about how current this metering
-	// is; null when ECS omits it. It can lag wall clock by days while
-	// per-bucket counters keep moving, so the age is exposed next to it
-	// rather than left for consumers to derive.
-	NamespaceUptodateTill       *time.Time  `json:"namespace_uptodate_till"`
-	NamespaceMeteringAgeSeconds *int64      `json:"namespace_metering_age_seconds"`
-	NamespaceQuotaBytes         *int64      `json:"namespace_quota_bytes"`
-	NamespaceUsedPercent        *float64    `json:"namespace_used_percent"`
-	NamespaceDefaultBlock       *int64      `json:"namespace_default_block_size"`
-	NamespaceBlockSize          *int64      `json:"namespace_block_size"`
-	NamespaceNotificationSize   *int64      `json:"namespace_notification_size"`
-	NamespaceAtQuota            bool        `json:"namespace_at_quota"`
-	NamespaceConfirmedOver      bool        `json:"namespace_confirmed_over"`
-	StaleAfterSeconds           int64       `json:"stale_after_seconds"`
-	ActivityWindowSeconds       int64       `json:"activity_window_seconds"`
-	HotBuckets                  int         `json:"hot_buckets"`
-	Buckets                     []apiBucket `json:"buckets"`
-}
+// The legacy /api/buckets wire types live in package ops so REST v1 and MCP
+// serve the identical shapes.
+type (
+	apiBucket   = ops.Bucket
+	apiActivity = ops.Activity
+)
 
 func (s *Server) handleAPIBuckets(w http.ResponseWriter, _ *http.Request) {
-	snap := s.deps.Snapshots.Snapshot()
-	resp := apiResponse{
-		Namespace:                 snap.Namespace,
-		PolledAt:                  snap.PolledAt.UTC(),
-		PollOK:                    snap.PollOK,
-		LastError:                 snap.LastError,
-		InventoryOK:               snap.InventoryOK,
-		InventoryError:            snap.InventoryError,
-		NamespaceUsedBytes:        snap.NamespaceBytes,
-		NamespaceObjects:          snap.NamespaceObjects,
-		NamespaceQuotaBytes:       snap.NamespaceQuotaBytes,
-		NamespaceUsedPercent:      snap.NamespaceUsedPercent,
-		NamespaceDefaultBlock:     snap.NamespaceDefaultBlock,
-		NamespaceBlockSize:        snap.NamespaceBlockSize,
-		NamespaceNotificationSize: snap.NamespaceNotificationSize,
-		NamespaceAtQuota:          snap.NamespaceAtQuota,
-		NamespaceConfirmedOver:    snap.NamespaceConfirmedOver,
-		StaleAfterSeconds:         int64(s.deps.Snapshots.StaleThreshold().Seconds()),
-		ActivityWindowSeconds:     int64(snap.ActivityWindow.Seconds()),
-		Buckets:                   make([]apiBucket, 0, len(snap.Buckets)),
-	}
-	if !snap.NamespaceUptodateTill.IsZero() {
-		ut := snap.NamespaceUptodateTill.UTC()
-		resp.NamespaceUptodateTill = &ut
-		age := int64(time.Now().UTC().Sub(ut).Seconds())
-		resp.NamespaceMeteringAgeSeconds = &age
-	}
-	for _, b := range snap.Buckets {
-		var uptodate *time.Time
-		if !b.UptodateTill.IsZero() {
-			ut := b.UptodateTill.UTC()
-			uptodate = &ut
-		}
-		var act *apiActivity
-		if b.Activity.Known {
-			act = &apiActivity{
-				Known:             true,
-				State:             activityState(b.Activity),
-				Changed:           b.Activity.Changed,
-				MeteringRefreshed: b.Activity.MeteringRefreshed,
-				FreshnessKnown:    b.Activity.FreshnessKnown,
-				WindowSeconds:     b.Activity.WindowSeconds,
-				ObjectsDelta:      b.Activity.ObjectsDelta,
-				BytesDelta:        b.Activity.BytesDelta,
-				ObjectsPerHour:    b.Activity.ObjectsPerHour,
-				BytesPerHour:      b.Activity.BytesPerHour,
-				MPUParts:          b.Activity.MPUParts,
-				MPUPartsDelta:     b.Activity.MPUPartsDelta,
-				BusyHours:         b.Activity.BusyHours,
-				ObservedHours:     b.Activity.ObservedHours,
-				Hot:               b.Activity.Hot,
-			}
-		}
-		if b.Activity.Hot {
-			resp.HotBuckets++
-		}
-		ab := apiBucket{
-			Name:             b.Name,
-			Namespace:        b.Namespace,
-			UsedBytes:        b.UsedBytes,
-			Objects:          b.Objects,
-			MPUBytes:         b.MPUBytes,
-			MPUParts:         b.MPUParts,
-			BlockSize:        b.BlockSize,
-			NotificationSize: b.NotificationSize,
-			QuotaMode:        quotaModeOf(b.BlockSize != nil, b.NotificationSize != nil),
-			QuotaBytes:       b.QuotaBytes,
-			UsedPercent:      b.UsedPercent,
-			UptodateTill:     uptodate,
-			Stale:            b.Stale,
-			AtQuota:          b.AtQuota,
-			OverStreak:       b.OverStreak,
-			ConfirmedOver:    b.ConfirmedOver,
-			Activity:         act,
-		}
-		resp.Buckets = append(resp.Buckets, ab)
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// quotaModeOf derives the ECS-native quota mode from the two thresholds.
-func quotaModeOf(hasBlock, hasNotify bool) string {
-	switch {
-	case hasBlock && hasNotify:
-		return "block-notify"
-	case hasBlock:
-		return "block-only"
-	case hasNotify:
-		return "notify-only"
-	default:
-		return "off"
-	}
+	writeJSON(w, http.StatusOK, s.ops.Report())
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

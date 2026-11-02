@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/fiztoz/ecs-phoenix-ext/internal/ops"
 	"github.com/fiztoz/ecs-phoenix-ext/internal/poller"
 )
 
@@ -53,22 +54,8 @@ type activityView struct {
 	Window string
 }
 
-// activityState maps the three-way freshness evidence onto one label, so
-// templates never have to reason about boolean combinations.
-func activityState(a poller.Activity) string {
-	switch {
-	case !a.Known:
-		return "unknown"
-	case a.Changed:
-		return "moved"
-	case a.MeteringRefreshed:
-		return "idle" // ECS republished metering and nothing moved: provably quiet
-	case a.FreshnessKnown:
-		return "unrefreshed" // ECS has not republished since the baseline
-	default:
-		return "unchanged" // no uptodate_till: idle and unrefreshed look identical
-	}
-}
+// activityState labels the freshness evidence; see ops.ActivityState.
+func activityState(a poller.Activity) string { return ops.ActivityState(a) }
 
 // toActivityView formats one bucket's derived activity for templates.
 func toActivityView(a poller.Activity, window time.Duration) activityView {

@@ -35,8 +35,15 @@ type Config struct {
 	BasePath       string `env:"BASE_PATH" envDefault:"/storage"`
 	PublicURL      string `env:"PUBLIC_URL"`
 	UIToken        string `env:"UI_TOKEN"`
-	LogLevel       string `env:"LOG_LEVEL" envDefault:"info"`
-	BucketMapFile  string `env:"BUCKET_MAP_FILE"` // reserved; unused in v1 logic
+	// PhoenixIdentitySecret verifies the X-Phoenix-Identity JWT the Phoenix
+	// extension gateway signs per proxied request (HS256, >= 32 bytes). Empty
+	// refuses the header; /api/v1 and /mcp then fall back to UI_TOKEN.
+	PhoenixIdentitySecret string `env:"PHOENIX_IDENTITY_SECRET"`
+	// PhoenixExtensionID is the aud claim the gateway must sign for: this
+	// extension's id in Phoenix's extension catalog.
+	PhoenixExtensionID string `env:"PHOENIX_EXTENSION_ID" envDefault:"ecs-phoenix-ext"`
+	LogLevel           string `env:"LOG_LEVEL" envDefault:"info"`
+	BucketMapFile      string `env:"BUCKET_MAP_FILE"` // reserved; unused in v1 logic
 }
 
 // Load parses the environment and validates locked constraints.
@@ -78,6 +85,14 @@ func Load() (*Config, error) {
 	cfg.BasePath = strings.TrimRight(cfg.BasePath, "/")
 	if cfg.BasePath == "" {
 		cfg.BasePath = "/"
+	}
+
+	if cfg.PhoenixIdentitySecret != "" && len(cfg.PhoenixIdentitySecret) < 32 {
+		return nil, fmt.Errorf("config: PHOENIX_IDENTITY_SECRET must be at least 32 bytes")
+	}
+	cfg.PhoenixExtensionID = strings.TrimSpace(cfg.PhoenixExtensionID)
+	if cfg.PhoenixExtensionID == "" {
+		return nil, fmt.Errorf("config: PHOENIX_EXTENSION_ID must not be empty")
 	}
 
 	switch cfg.DatabaseEngine {

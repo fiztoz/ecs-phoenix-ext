@@ -177,6 +177,8 @@ default CI runs fixture tests only.
 | `BASE_PATH` | no | `/storage` | Path prefix behind Ingress `/storage` |
 | `PUBLIC_URL` | no | — | Optional absolute URL for logs |
 | `UI_TOKEN` | no | empty | If set, dashboard/API/forms require `Authorization: Bearer …` or a `ui_token` query/form parameter. A valid credential is exchanged for an HttpOnly `SameSite=Lax` session cookie (`ecs_ui_session`, scoped to `BASE_PATH`) so the extension's own links and form posts keep working — this is what makes the Phoenix iframe flow work end-to-end. Empty means the UI is open to anyone who can reach it. Health stays open either way |
+| `PHOENIX_IDENTITY_SECRET` | no | empty | HS256 secret (≥ 32 bytes) shared with the Phoenix extension gateway, used to verify `X-Phoenix-Identity` on `/api/v1` and `/mcp`. Empty refuses that header. See [Programmatic API and MCP](#programmatic-api-and-mcp) |
+| `PHOENIX_EXTENSION_ID` | no | `ecs-phoenix-ext` | The `aud` the gateway must sign for: this extension's id in Phoenix's catalog |
 | `LOG_LEVEL` | no | `info` | slog level |
 
 ## MariaDB (dedicated schema and user, manual creation)
@@ -251,6 +253,83 @@ stroke-drawn `currentColor` bucket with fill level, so it adapts to light
 and dark sidebars.
 
 Quota overage is not an outage: it must not flip the `s3` heartbeat DOWN.
+
+## Programmatic API and MCP
+
+Every programmatic surface is read-only and served from the poller snapshot
+and the activity history: no caller request ever reaches ECS. The
+management user is NAMESPACE_ADMIN, so a passthrough would hand that role to
+anyone who can call the API. A write operation, if one is ever added, gets
+its own named endpoint, MCP tool and scope.
+
+| Route | Returns |
+|---|---|
+| `GET {base}/api/v1/whoami` | the resolved caller: `subject`, `kind`, `scopes` |
+| `GET {base}/api/v1/namespace` | namespace usage, quota, poll health, roll-ups (`bucket_count`, `at_quota_buckets`, `confirmed_over_buckets`, `stale_buckets`, `hot_buckets`) |
+| `GET {base}/api/v1/buckets` | buckets; query `sort` (`name`·`used`·`objects`·`used_percent`·`activity`), `prefix`, `at_quota=true`, `hot=true`, `limit` (1–1000). `total`/`truncated` tell a short page from a cut one |
+| `GET {base}/api/v1/buckets/{bucket}` | one bucket (404 when unknown) |
+| `GET {base}/api/v1/buckets/{bucket}/activity` | hourly derived activity; query `hours` (1–2160, default 24). Only measured hours are listed |
+| `POST {base}/mcp` | MCP over Streamable HTTP |
+
+Bucket and summary objects use the same shapes as `/api/buckets`, which is
+unchanged.
+
+**MCP.** Built on the official Go SDK
+(`github.com/modelcontextprotocol/go-sdk`). It runs stateless over
+Streamable HTTP with JSON responses: one POST per message, no
+`Mcp-Session-Id`, so any replica answers and the gateway needs no affinity.
+`GET`/`DELETE` answer 405, and the SDK negotiates the protocol revision.
+Each request gets its own SDK server holding only the tools the caller's
+scopes allow, so `tools/list` and `tools/call` cannot disagree. Arguments
+are validated against the input schema (enums, bounds, no unknown fields)
+before a handler runs. Cross-site browser POSTs get 403. Tools, all marked
+`readOnlyHint` and all needing scope `read`:
+
+| Tool | Arguments |
+|---|---|
+| `ecs_namespace_summary` | — |
+| `ecs_list_buckets` | `sort`, `prefix`, `at_quota_only`, `hot_only`, `limit` (default 50) |
+| `ecs_get_bucket` | `bucket` |
+| `ecs_bucket_activity_history` | `bucket`, `hours` |
+
+The `initialize` instructions tell the model that activity is write-side net
+movement only, so it does not report a GET-heavy bucket as unused. Every
+`tools/call` is logged with the caller's subject.
+
+**Who may call.** Resolved per request, in this order:
+
+1. `X-Phoenix-Identity` present → it must verify against
+   `PHOENIX_IDENTITY_SECRET`, and its `scope` claim is the caller's scopes.
+   A bad header, or one arriving while no secret is set, is a 401. It never
+   falls back to the UI token.
+2. `UI_TOKEN` set → `Authorization: Bearer` or the `ecs_ui_session` cookie
+   grants `read`. Query parameters are not accepted on these routes.
+3. Neither variable set → open `read`, like `/api/buckets`.
+
+If only `PHOENIX_IDENTITY_SECRET` is set, direct calls that do not come
+through the gateway are refused.
+
+The identity token is a compact HS256 JWT that Phoenix's extension gateway
+signs for each request. Its claims are `iss=uptime-phoenix`,
+`aud=PHOENIX_EXTENSION_ID`, `sub` (Phoenix user id), optional `name`/`kind`,
+`scope` (space-separated, extension-local, e.g. `read`), `iat` and `exp`.
+`exp − iat` must be at most 5 minutes, and 30 s of clock skew is tolerated.
+Only `HS256` is accepted. The gateway, with per-user and per-extension grants that only admins can
+give, is a proposal and not shipped Phoenix code:
+[uptime-phoenix#188](https://github.com/fiztoz/uptime-phoenix/issues/188).
+
+The dashboard's **API & MCP** button opens a usage guide (also linkable as
+`{base}/#api-guide`). It shows the endpoints and client setup that match
+how this instance is configured. It only shows whether credentials are set,
+never their values.
+
+Until the gateway ships, an MCP client can use the extension directly with
+the UI token:
+
+```bash
+claude mcp add --transport http ecs https://phoenix.example.com/storage/mcp \
+  --header "Authorization: Bearer $UI_TOKEN"
+```
 
 ## Docker
 

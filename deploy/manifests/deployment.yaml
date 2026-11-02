@@ -50,6 +50,15 @@ spec:
                   key: dsn
             - name: BASE_PATH
               value: /storage
+            # Optional: verifies X-Phoenix-Identity from the Phoenix
+            # extension gateway on /api/v1 and /mcp. Same value as the
+            # gateway's signing secret for this extension.
+            - name: PHOENIX_IDENTITY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ecs-phoenix-ext
+                  key: phoenix-identity-secret
+                  optional: true
             - name: LISTEN_ADDR
               value: ":80"
           volumeMounts:
